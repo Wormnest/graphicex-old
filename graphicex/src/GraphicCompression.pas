@@ -16,9 +16,12 @@ unit GraphicCompression;
 //
 // Portions created by Mike Lischke are
 // Copyright (C) 1999-2003 Dipl. Ing. Mike Lischke. All Rights Reserved.
+// Portions created by Jacob Boerema are
+// Copyright (C) 2012, 2013 Jacob Boerema. All Rights Reserved.
 //----------------------------------------------------------------------------------------------------------------------
 //
 // This file is part of the image library GraphicEx.
+// This fork of GraphicEx can be found at https://bitbucket.org/jacobb/jgb-thirdparty
 //
 // GraphicCompression contains various encoder/decoder classes used to handle compressed
 // data in the various image classes.
@@ -61,8 +64,8 @@ interface
 
 uses                                                
   Windows, Classes, SysUtils, Graphics,  
-  JPG,   // JPEG compression support
-  GXzLib;  // general inflate/deflate and LZ77 compression support
+  LibJpegDelphi, //JPG,   // JPEG compression support
+  ZLibDelphi; //GXzLib;  // general inflate/deflate and LZ77 compression support
      
 type
   // abstract decoder class to define the base functionality of an encoder/decoder
@@ -202,7 +205,7 @@ type
 
   TLZ77Decoder = class(TDecoder)
   private
-    FStream: z_stream;
+    FStream: RZStream; //z_stream;
     FZLibResult,         // contains the return code of the last ZLib operation
     FFlushMode: Integer; // one of flush constants declard in ZLib.pas
                          // this is usually Z_FINISH for PSP and Z_PARTIAL_FLUSH for PNG
@@ -2060,18 +2063,18 @@ end;
 procedure TLZ77Decoder.Decode(var Source, Dest: Pointer; PackedSize, UnpackedSize: Integer);
 
 begin
-  FStream.next_in := Source;
-  FStream.avail_in := PackedSize;
+  FStream.NextIn := Source;
+  FStream.AvailIn := PackedSize;
   if FAutoReset then
-    FZLibResult := InflateReset(FStream);
+    FZLibResult := InflateReset(@FStream);
   if FZLibResult = Z_OK then
   begin
-    FStream.next_out := Dest;
-    FStream.avail_out := UnpackedSize;
-    FZLibResult := Inflate(FStream, FFlushMode);
+    FStream.NextOut := Dest;
+    FStream.AvailOut := UnpackedSize;
+    FZLibResult := Inflate(@FStream, FFlushMode);
     // advance pointers so used input can be calculated
-    Source := FStream.next_in;
-    Dest := FStream.next_out;
+    Source := FStream.NextIn;
+    Dest := FStream.NextOut;
   end;
 end;
 
@@ -2080,7 +2083,7 @@ end;
 procedure TLZ77Decoder.DecodeEnd;
 
 begin
-  if InflateEnd(FStream) < 0 then
+  if InflateEnd(@FStream) < 0 then
     CompressionError(gesLZ77Error);
 end;
 
@@ -2089,7 +2092,7 @@ end;
 procedure TLZ77Decoder.DecodeInit;
 
 begin
-  if InflateInit(FStream) < 0 then
+  if InflateInit(@FStream) < 0 then
     CompressionError(gesLZ77Error);
 end;
 
@@ -2105,7 +2108,7 @@ end;
 function TLZ77Decoder.GetAvailableInput: Integer;
 
 begin
-  Result := FStream.avail_in;
+  Result := FStream.AvailIn;
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -2113,7 +2116,7 @@ end;
 function TLZ77Decoder.GetAvailableOutput: Integer;
 
 begin
-  Result := FStream.avail_out;
+  Result := FStream.AvailOut;
 end;
 
 (*

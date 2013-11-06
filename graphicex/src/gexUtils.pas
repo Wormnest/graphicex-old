@@ -26,28 +26,39 @@ interface
 
 // Reads the next four bytes from the memory pointed to by Run, converts this into a
 // cardinal number (inclusive byte order swapping) and advances Run.
-function ReadBigEndianCardinal(var Run: PAnsiChar): Cardinal;
+function ReadBigEndianCardinal(var Run: PByte): Cardinal;
 
 // Reads the next four bytes from the memory pointed to by Run, converts this into a
 // cardinal number (inclusive byte order swapping) and advances Run.
-function ReadBigEndianInteger(var Run: PAnsiChar): Integer;
+function ReadBigEndianInteger(var Run: PByte): Integer;
 
 // Reads the next two bytes from the memory pointed to by Run, converts this into a
 // word number (inclusive byte order swapping) and advances Run.
-function ReadBigEndianWord(var Run: PAnsiChar): Word;
+function ReadBigEndianWord(var Run: PByte): Word;
+
+// Reads the next four bytes from the memory pointed to by Run, converts this into a
+// single number (inclusive byte order swapping) and advances Run.
+function ReadBigEndianSingle(var Run: PByte): Single;
 
 // Reads the next eight bytes from the memory pointed to by Run, converts this into a
 // double number (inclusive byte order swapping) and advances Run.
-function ReadBigEndianDouble(var Run: PAnsiChar): Double;
+function ReadBigEndianDouble(var Run: PByte): Double;
 
 // Reads the next Len bytes from the memory pointed to by Run, converts this into a
 // Unicode string (inclusive byte order swapping) and advances Run.
-// Run is not really a PAnsiChar type, but an untyped pointer using PAnsiChar for easier pointer maths.
-function ReadBigEndianString(var Run: PAnsiChar; Len: Cardinal): WideString; overload;
+function ReadBigEndianString(var Run: PByte; Len: Cardinal): WideString; overload;
 
 // Same as ReadBigEndianString with length parameter.
 // However the length will first be retrieved.
-function ReadBigEndianString(var Run: PAnsiChar): WideString; overload;
+function ReadBigEndianString(var Run: PByte): WideString; overload;
+
+// Reads the next Len bytes from the memory pointed to by Run, converts this into a
+// wide string and advances Run with Len bytes.
+function ReadUtf8String(var Run: PByte; Len: Cardinal): WideString;
+
+// Same as previous ReadUtf8String, however it first reads the length and converts it
+// from BigEndian.
+function ReadUtf8StringBigEndianLength(var Run: PByte): WideString;
 
 
 // swaps high and low byte of 16 bit values
@@ -144,7 +155,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function ReadBigEndianCardinal(var Run: PAnsiChar): Cardinal;
+function ReadBigEndianCardinal(var Run: PByte): Cardinal;
 
 // Reads the next four bytes from the memory pointed to by Run, converts this into a
 // cardinal number (inclusive byte order swapping) and advances Run.
@@ -156,7 +167,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function ReadBigEndianInteger(var Run: PAnsiChar): Integer;
+function ReadBigEndianInteger(var Run: PByte): Integer;
 
 // Reads the next four bytes from the memory pointed to by Run, converts this into a
 // cardinal number (inclusive byte order swapping) and advances Run.
@@ -168,7 +179,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function ReadBigEndianWord(var Run: PAnsiChar): Word;
+function ReadBigEndianWord(var Run: PByte): Word;
 
 // Reads the next two bytes from the memory pointed to by Run, converts this into a
 // word number (inclusive byte order swapping) and advances Run.
@@ -180,7 +191,22 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function ReadBigEndianDouble(var Run: PAnsiChar): Double;
+// Reads the next four bytes from the memory pointed to by Run, converts this into a
+// single number (inclusive byte order swapping) and advances Run.
+function ReadBigEndianSingle(var Run: PByte): Single;
+type TSingleCardinal = record
+       case Integer of
+         0: (SingleValue: Single);
+         1: (CardinalValue: Cardinal);
+     end;
+begin
+  TSingleCardinal(Result).SingleValue := TSingleCardinal(SwapLong(PCardinal(Run)^)).SingleValue;
+  Inc(PCardinal(Run));
+end;
+
+//----------------------------------------------------------------------------------------------------------------------
+
+function ReadBigEndianDouble(var Run: PByte): Double;
 
 // Reads the next eight bytes from the memory pointed to by Run, converts this into a
 // double number (inclusive byte order swapping) and advances Run.
@@ -192,11 +218,10 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function ReadBigEndianString(var Run: PAnsiChar; Len: Cardinal): WideString; overload;
+function ReadBigEndianString(var Run: PByte; Len: Cardinal): WideString; overload;
 
 // Reads the next Len bytes from the memory pointed to by Run, converts this into a
 // Unicode string (inclusive byte order swapping) and advances Run.
-// Run is not really a PAnsiChar type, but an untyped pointer using PAnsiChar for easier pointer maths.
 
 begin
   SetString(Result, PWideChar(Run), Len);
@@ -206,7 +231,7 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-function ReadBigEndianString(var Run: PAnsiChar): WideString; overload;
+function ReadBigEndianString(var Run: PByte): WideString; overload;
 
 // Same as ReadBigEndianString with length parameter.
 // However the length will first be retrieved.
@@ -221,5 +246,28 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
+function ReadUtf8String(var Run: PByte; Len: Cardinal): WideString;
+
+// Reads the next Len bytes from the memory pointed to by Run, converts this into a
+// wide string and advances Run with Len bytes.
+
+begin
+  SetString(Result, PAnsiChar(Run), Len); // Not PWideChar!
+  Inc(Run, Len);
+end;
+
+//----------------------------------------------------------------------------------------------------------------------
+
+function ReadUtf8StringBigEndianLength(var Run: PByte): WideString;
+var Len: Cardinal;
+// Same as previous ReadUtf8String, however it first reads the length and converts it
+// from BigEndian.
+
+begin
+  Len := ReadBigEndianCardinal(Run);
+  Result := ReadUtf8String(Run, Len);
+end;
+
+//----------------------------------------------------------------------------------------------------------------------
 
 end.
