@@ -2433,10 +2433,10 @@ begin
           // 1, 2 and 4 bits apparently only for Indexed/Grayscale
           if ((SamplesPerPixel in [3, 4]) and (BitsPerSample in [8, 16]) and
              (SampleFormat in [SAMPLEFORMAT_UINT, SAMPLEFORMAT_INT, SAMPLEFORMAT_VOID])
-             and not (ioSeparatePlanes in Options) and not (ColorScheme in [csCMYK])) or
-             ((SamplesPerPixel in [1,2]) and not (ColorScheme in [csG, csGA, csIndexed, csIndexedA])) then begin
+             and not (ioSeparatePlanes in Options) and not (ColorScheme in [csCMYK, csCMYKA])) or
+             ((SamplesPerPixel in [1,2]) and not (ColorScheme in [csG, csGA, csIndexed, csIndexedA, csCIELab])) then begin
              // Generic RGBA reading interface
-            if Height > 0 then
+            if (Height > 0) and (Width > 0) then
             begin
               // 3 or more samples per pixel are used for RGB(A), CMYK, L*a*b*, YCbCr etc.
               // All of these will be converted to RGBA.
@@ -2487,25 +2487,28 @@ begin
             end;
           end
           else begin
+            if (Width = 0) or (Height = 0) then
+              // We can't show broken images where either width or height is 0.
+              Exit;
             // Monochrome and indexed with 1-64 bits per pixel including floating point
             // RGB(A) 16, 32, 64 bits including floating point
             // Strip, Tiles, contiguous and planar are all supported
             ColorManager.SourceBitsPerSample := BitsPerSample;
             ColorManager.SourceSamplesPerPixel := SamplesPerPixel;
 
-            // TargetBitsPerSample needs to correspond to the TargetPixelFormat
-            // or else the image will not be painted correctly.
-            if (BitsPerSample >= 5) and (BitsPerSample <= 64) then
-              ColorManager.TargetBitsPerSample := 8
-            else if BitsPerSample in [2, 3, 4] then
-              ColorManager.TargetBitsPerSample := 4
-            else // 1 BitsPerSample, or values > 64 which we don't support and will throw an error
-              ColorManager.TargetBitsPerSample := BitsPerSample;
-
-            ColorManager.TargetSamplesPerPixel := SamplesPerPixel;
-
             if ColorScheme in [csG, csGA, csIndexed, csIndexedA] then begin
               // Monochrome images are handled just like indexed images (a gray scale palette is used).
+
+              // TargetBitsPerSample needs to correspond to the TargetPixelFormat
+              // or else the image will not be painted correctly.
+              if (BitsPerSample >= 5) and (BitsPerSample <= 64) then
+                ColorManager.TargetBitsPerSample := 8
+              else if BitsPerSample in [2, 3, 4] then
+                ColorManager.TargetBitsPerSample := 4
+              else // 1 BitsPerSample, or values > 64 which we don't support and will throw an error
+                ColorManager.TargetBitsPerSample := BitsPerSample;
+
+              ColorManager.TargetSamplesPerPixel := SamplesPerPixel;
               if ioSeparatePlanes in Options then begin
                 // Only possible for Grayscale or Indexed with alpha.
                 // Since we're currently not handling the alpha in these cases
@@ -2517,8 +2520,13 @@ begin
             end
             else begin
               // Assume we want BGR(A) for everything else
-              // TODO: For other color schemes than RBG(A) we might need to adjust
-              // other things like TargetSamplesPerPixel
+
+              // TargetBitsPerSample needs to correspond to the TargetPixelFormat
+              // or else the image will not be painted correctly.
+              // For BGR/RGB  we are always converting to 8 bits
+              // since target 1, 4 bits would need palette handling.
+              ColorManager.TargetBitsPerSample := 8;
+
               if HasAlpha then
                 // Note that if we wanted to add alpha where the source doesn't
                 // have alpha we would need to add the next line:
@@ -2526,9 +2534,32 @@ begin
                 ColorManager.TargetColorScheme := csBGRA
               else
                 ColorManager.TargetColorScheme := csBGR;
-              if ColorScheme = csCMYK then
-                // CMYK is using 4 samples without alpha where BGR/RGB has 3
-                ColorManager.TargetSamplesPerPixel := SamplesPerPixel-1;
+
+              case ColorScheme of
+                csCMYK, csCMYKA:
+                  // CMYK(A) is using 4(5) samples without alpha where BGR/RGB has 3
+                  ColorManager.TargetSamplesPerPixel := SamplesPerPixel-1;
+                csCIELab:
+                  begin
+                    if SamplesPerPixel >= 3 then begin
+                      // Currently not used since it seems our CIELAB to BGR conversion
+                      // seems to be more red than libtif's conversion and IrfanView.
+                      // Investigate if and how we can use libtif's own conversion functions.
+                      ColorManager.TargetSamplesPerPixel := SamplesPerPixel;
+                      ColorManager.SourceOptions := ColorManager.SourceOptions +
+                        [coLabByteRange];
+                    end
+                    else begin
+                      ColorManager.TargetSamplesPerPixel := 1;
+                      ColorManager.TargetColorScheme := csG;
+                      // The one example I have has a range from light=1 to dark= 254
+                      // It has an extra TIFF tag: Halftone Hints: light 1 dark 254
+                      Include(Options, ioMinIsWhite);
+                    end;
+                  end;
+              else
+                ColorManager.TargetSamplesPerPixel := SamplesPerPixel;
+              end;
             end;
 
             PixelFormat := ColorManager.TargetPixelFormat;
@@ -2557,15 +2588,24 @@ begin
 
               if GotPalette > 0 then
               begin
-                // TODO: Palette with more than 8 bits indexes should be converted to RGB images
-                // Because downscaling a palette is very complicated.
-                // Create the palette from the three maps.
-                Palette := ColorManager.CreateColorPalette([RedMap, GreenMap, Bluemap], pfPlane16Triple, 1 shl BitsPerPixel, True);
+                if BitsPerSample in [9..16] then begin
+                  // Palette images with more than 8 bits per sample are converted
+                  // to RGB since Windows palette can have a maximum of 8 bits (256) entries
+                  // ans downscaling a palette is very complicated.
+                  ColorManager.SetSourcePalette([RedMap, GreenMap, Bluemap], pfPlane16Triple);
+                  ColorManager.TargetColorScheme := csBGR; // TODO: Also support alpha if HasAlpha!
+                  ColorManager.TargetBitsPerSample := 8;
+                  ColorManager.TargetSamplesPerPixel := 3;
+                  PixelFormat := ColorManager.TargetPixelFormat;
+                end
+                else
+                  // Create the palette from the three maps.
+                  Palette := ColorManager.CreateColorPalette([RedMap, GreenMap, Bluemap], pfPlane16Triple, 1 shl BitsPerPixel, True);
               end
               else // If there was no palette then use a grayscale palette.
                 Palette := ColorManager.CreateGrayscalePalette(False);
             end
-            else if ColorScheme in [csG, csGA] then
+            else if (ColorScheme in [csG, csGA]) or (ColorManager.TargetColorScheme in [csG, csGA]) then
             begin
               // Gray scale image data.
               Palette := ColorManager.CreateGrayscalePalette(ioMinIsWhite in Options);
@@ -2786,7 +2826,10 @@ begin
             else
               ColorScheme := csIndexed;
           PHOTOMETRIC_SEPARATED:
-            ColorScheme := csCMYK;
+            if HasAlpha then
+              ColorScheme := csCMYKA
+            else
+              ColorScheme := csCMYK;
           PHOTOMETRIC_YCBCR:
             ColorScheme := csYCbCr;
           PHOTOMETRIC_CIELAB:
@@ -5991,8 +6034,10 @@ begin
         Result := csUnknown;
       end;
     PSD_CMYK:
-      if ChannelCount >= 4 then
+      if ChannelCount = 4 then
         Result := csCMYK
+      else if ChannelCount = 5 then
+        Result := csCMYKA
       else
         Result := csUnknown;
     PSD_LAB:
@@ -6494,7 +6539,7 @@ begin
         end;
       csRGB,
       csRGBA,
-      csCMYK,
+      csCMYK, csCMYKA,
       csCIELab:
         begin
           // Data is organized in planes. This means first all red rows, then
@@ -6555,7 +6600,8 @@ begin
                     AdvanceProgress(100 / H, 0, 1, True);
                   end;
                 end;
-              csCMYK:
+              csCMYK,
+              csCMYKA:
                 begin
                   // Photoshop CMYK values are given with 0 for maximum values, but the
                   // (general) CMYK conversion works with 255 as maxium value. Hence we must reverse
@@ -6969,6 +7015,12 @@ begin
           SourceColorScheme := CurrentColorScheme;
           TargetColorScheme := csBGR;
           TargetSamplesPerPixel := 3;
+        end;
+      csCMYKA:
+        begin
+          SourceColorScheme := CurrentColorScheme;
+          TargetColorScheme := csBGRA;
+          TargetSamplesPerPixel := 4;
         end;
       csCIELab:
         begin
