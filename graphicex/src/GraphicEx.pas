@@ -2649,6 +2649,7 @@ var
   TIFFCompression: Word;
   ResUnit: Word;
   FillOrder: Word;
+  TiffStringValue: array [0..0] of PAnsiChar;
 
   {$ifndef DELPHI_7_UP}
     // Structure used to build a va_list array.
@@ -2858,6 +2859,11 @@ begin
         TIFFGetFieldDefaulted(TIFFImage, TIFFTAG_FILLORDER, @FillOrder);
         if FillOrder = FILLORDER_LSB2MSB then
           Include(Options, ioReversed);
+
+        // Get TIFF Image Description (if present)
+        if (TIFFGetField(TIFFImage, TIFFTAG_IMAGEDESCRIPTION, @TiffStringValue) = 1) and
+           (TiffStringValue[0] <> nil) then
+          Comment := TiffStringValue[0];
       finally
         TIFFClose(TIFFImage);
       end
@@ -7884,13 +7890,21 @@ begin
                          LayerStartOfs := (AbsoluteRect.Left + 7) div 8;
                        end;
                     4: begin
-                         LayerRowSize := LayerWidth div 2 + 1;
-                         LayerStartOfs := AbsoluteRect.Left  div 2 + 1;
+                         LayerRowSize := (LayerWidth + 1) div 2;
+                         LayerStartOfs := (AbsoluteRect.Left + 1) div 2;
                        end;
                   else // 8
                     LayerRowSize := LayerWidth;
                     LayerStartOfs := AbsoluteRect.Left;
                   end;
+
+                  // From PSP spec: Each scanline in the image data is stored on a 4 byte boundary.
+                  // Therefore we need to make sure LayerRowSize is a multiple of 4.
+                  // Note: Nowhere do I see any mention that 8 BitsPerSample is being excluded
+                  // from this but with the sample images we have this seems to be the case.
+                  if BitsPerSample <> 8 then
+                    LayerRowSize := (LayerRowSize + 3) div 4 * 4;
+
                   for Y := AbsoluteRect.Top to AbsoluteRect.Bottom - 1 do
                   begin
                     // Note: I don't have any samples for BPS = 1 or 4 and am not
