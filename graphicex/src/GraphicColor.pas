@@ -321,6 +321,7 @@ type
     procedure RowConvertIndexedSource16(Source: array of Pointer; Target: Pointer; Count: Cardinal; Mask: Byte);
     procedure RowConvertIndexedTarget16(Source: array of Pointer; Target: Pointer; Count: Cardinal; Mask: Byte);
     procedure RowConvertIndexed2BGR(Source: array of Pointer; Target: Pointer; Count: Cardinal; Mask: Byte);
+    procedure RowConvertGray2BGR(Source: array of Pointer; Target: Pointer; Count: Cardinal; Mask: Byte);
     procedure RowConvertRGB2BGR(Source: array of Pointer; Target: Pointer; Count: Cardinal; Mask: Byte);
     procedure RowConvertRGB2RGB(Source: array of Pointer; Target: Pointer; Count: Cardinal; Mask: Byte);
     procedure RowConvertPhotoYCC2BGR(Source: array of Pointer; Target: Pointer; Count: Cardinal; Mask: Byte);
@@ -371,6 +372,17 @@ function RGBToHLS(const RGB: TRGBFloat): THLSFloat;
 function HLSInterpolation(const HLS1, HLS2: THLSFloat; Ratio: Extended): THLSFloat;
 function RGBInterpolation(const RGB1, RGB2: TRGBFloat; Ratio: Extended): TRGBFloat; overload;
 function RGBInterpolation(const RGB1, RGB2: TRGB; Ratio: Extended): TRGB; overload;
+
+// Convert from CIE L*a*b* to CIE XYZ with D50 white point.
+procedure CIELabToXYZ(L, a, b: Extended; out X, Y, Z: Extended);
+// Convert from CIE XYZ to 8 bits BGR.
+procedure XYZToBGR(X, Y, Z: Extended; bgr: PBGR);
+// Convert from CIE XYZ to 8 bits RGB.
+procedure XYZToRGB(X, Y, Z: Extended; rgb: PRGB);
+// Convert from CIE XYZ to 16 bits BGR.
+procedure XYZToBGR16(X, Y, Z: Extended; bgr: PBGR16);
+// Convert from CIE XYZ to 16 bits RGB.
+procedure XYZToRGB16(X, Y, Z: Extended; rgb: PRGB16);
 
 function  HSVToRGB32(const A, H, S, V: Integer): TRGBAColor32;
 procedure RGBToHSV32(const ARGB: TRGBAColor32; var H, S, V: Integer);
@@ -2306,9 +2318,191 @@ end;
 
 //------------------------------------------------------------------------------
 
+const
+  // From LibTiff tif_aux.c:
+  // TIFF 6.0 specification tells that it is no default value for the WhitePoint,
+  // but AdobePhotoshop TIFF Technical Note tells that it should be CIE D50.
+
+  // Observer= 2°, Illuminant= D50
+  ref_X =  96.422;
+  ref_Y = 100.000;
+  ref_Z =  82.521;
+
+  // Use a const for 16 / 116 to improve speed.
+  _16_116 = 16.0 / 116.0;
+
+// Convert from CIE L*a*b* to CIE XYZ with D50 white point.
+// http://www.easyrgb.com/index.php?X=MATH&H=08#text8
+// To improve speed only compute Power3 when needed: 0.206893^3 = 0.008856
+procedure CIELabToXYZ(L, a, b: Extended; out X, Y, Z: Extended);
+var vX, vY, vZ: Extended;
+begin
+  vY := (L + 16 ) / 116;
+  vX := a / 500 + vY;
+  vZ := vY - b / 200;
+
+  if vY > 0.206893 then
+    vY := Power(vY, 3)
+  else
+    vY := (vY - _16_116) / 7.787;
+
+  if vX > 0.206893 then
+    vX := Power(vX, 3)
+  else
+    vX := (vX - _16_116) / 7.787;
+
+  if vZ > 0.206893 then
+    vZ := Power(vZ, 3)
+  else
+    vZ := (vZ - _16_116) / 7.787;
+
+  X := ref_X * vX;
+  Y := ref_Y * vY;
+  Z := ref_Z * vZ;
+
+  { Original GraphicEx conversion (using D65 white point)
+  YYn3 := (L + 16) / 116; // this corresponds to (Y/Yn)^1/3
+  if L < 7.9996 then
+  begin
+    Y := L / 903.3;
+    X := a / 3893.5 + Y;
+    Z := Y - b / 1557.4;
+  end
+  else
+  begin
+    T := YYn3 + a / 500;
+    X := T * T * T;
+    Y := YYn3 * YYn3 * YYn3;
+    T := YYn3 - b / 200;
+    Z := T * T * T;
+  end; }
+end;
+
+// Convert from CIE XYZ to BGR (Extended Float, range 0-1).
+// http://www.easyrgb.com/index.php?X=MATH&H=01#text1
+procedure XYZToBGRExtended(X, Y, Z: Extended; out b, g, r: Extended);
+var vr, vg, vb: Extended;
+begin
+  X := X / 100;
+  Y := Y / 100;
+  Z := Z / 100;
+  vr := X *  3.2406 + Y * -1.5372 + Z * -0.4986;
+  vg := X * -0.9689 + Y *  1.8758 + Z *  0.0415;
+  vb := X *  0.0557 + Y * -0.2040 + Z *  1.0570;
+
+  if vr > 0.0031308 then
+    r := 1.055 * Power(vr, 1/2.4) - 0.055
+  else
+    r := 12.92 * vr;
+  if vg > 0.0031308 then
+    g := 1.055 * Power(vg, 1/2.4) - 0.055
+  else
+    g := 12.92 * vg;
+  if vb > 0.0031308 then
+    b := 1.055 * Power(vb, 1/2.4) - 0.055
+  else
+    b := 12.92 * vb;
+end;
+
+// Convert from CIE XYZ to 8 bits BGR.
+procedure XYZToBGR(X, Y, Z: Extended; bgr: PBGR);
+var vr, vg, vb: Extended;
+begin
+  XYZToBGRExtended(X, Y, Z, vb, vg, vr);
+
+  bgr^.B := ClampByte(Round(255 * vb));
+  bgr^.G := ClampByte(Round(255 * vg));
+  bgr^.R := ClampByte(Round(255 * vr));
+
+  { Original GraphicEx conversion
+  // blue
+  bgr^.B := ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z)));
+  // green
+  bgr^.G := ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z)));
+  // red
+  bgr^.R := ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z)));
+  }
+end;
+
+// Convert from CIE XYZ to 8 bits RGB.
+procedure XYZToRGB(X, Y, Z: Extended; rgb: PRGB);
+var vr, vg, vb: Extended;
+begin
+  XYZToBGRExtended(X, Y, Z, vb, vg, vr);
+
+  rgb^.R := ClampByte(Round(255 * vr));
+  rgb^.G := ClampByte(Round(255 * vg));
+  rgb^.B := ClampByte(Round(255 * vb));
+
+  { Original GraphicEx conversion
+  // red
+  Target8^ := ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z)));
+  Inc(Target8);
+  // green
+  Target8^ := ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z)));
+  Inc(Target8);
+  // blue
+  Target8^ := ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z)));
+  }
+end;
+
+function ClampWord(w: Integer): Word;
+begin
+  if w < 0 then
+    Result := 0
+  else if w > MaxWord then
+    Result := MaxWord
+  else
+    Result := w;
+end;
+
+// Convert from CIE XYZ to 16 bits BGR.
+procedure XYZToBGR16(X, Y, Z: Extended; bgr: PBGR16);
+var vr, vg, vb: Extended;
+begin
+  XYZToBGRExtended(X, Y, Z, vb, vg, vr);
+
+  bgr^.B := ClampWord(Round(65535 * vb));
+  bgr^.G := ClampWord(Round(65535 * vg));
+  bgr^.R := ClampWord(Round(65535 * vr));
+
+  { Original GraphicEx conversion
+  // blue
+  Target16^ := MulDiv16(ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z))), 65535, 255);
+  Inc(Target16);
+  // green
+  Target16^ := MulDiv16(ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z))), 65535, 255);
+  Inc(Target16);
+  // red
+  Target16^ := MulDiv16(ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z))), 65535, 255);
+  }
+end;
+
+// Convert from CIE XYZ to 16 bits RGB.
+procedure XYZToRGB16(X, Y, Z: Extended; rgb: PRGB16);
+var vr, vg, vb: Extended;
+begin
+  XYZToBGRExtended(X, Y, Z, vb, vg, vr);
+
+  rgb^.R := ClampWord(Round(65535 * vr));
+  rgb^.G := ClampWord(Round(65535 * vg));
+  rgb^.B := ClampWord(Round(65535 * vb));
+
+  { Original GraphicEx conversion
+  // red
+  Target16^ := MulDiv16(ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z))), 65535, 255);
+  // green
+  Target16^ := MulDiv16(ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z))), 65535, 255);
+  Inc(Target16);
+  // blue
+  Target16^ := MulDiv16(ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z))), 65535, 255);
+  Inc(Target16);
+  }
+end;
+
 procedure TColorManager.RowConvertCIELAB2BGR(Source: array of Pointer; Target: Pointer; Count: Cardinal; Mask: Byte);
 
-// Conversion of the CIE L*a*b color space to BGR using a two way approach assuming a D65 white point,
+// Conversion of the CIE L*a*b* color space to BGR using a two way approach
 // first a conversion to CIE XYZ is performed and then from there to RGB
 
 var
@@ -2319,9 +2513,7 @@ var
   aRun16,
   bRun16: PWord;
   L, a, b,
-  X, Y, Z, // Color values in float format
-  T,
-  YYn3: Extended;  // Intermediate results
+  X, Y, Z: Extended; // Color values in float format
   Target8: PByte;
   Target16: PWord;
   Increment: Integer;
@@ -2379,32 +2571,12 @@ begin
                     Inc(bRun8, Increment);
                   end;
 
-                  YYn3 := (L + 16) / 116; // this corresponds to (Y/Yn)^1/3
-                  if L < 7.9996 then
-                  begin
-                    Y := L / 903.3;
-                    X := a / 3893.5 + Y;
-                    Z := Y - b / 1557.4;
-                  end
-                  else
-                  begin
-                    T := YYn3 + a / 500;
-                    X := T * T * T;
-                    Y := YYn3 * YYn3 * YYn3;
-                    T := YYn3 - b / 200;
-                    Z := T * T * T;
-                  end;
+                  // Convert from CIE L*a*b* to CIE XYZ
+                  CIELabToXYZ(L, a, b, X, Y, Z);
 
                   // Once we have CIE XYZ it is easy (yet quite expensive) to calculate RGB values from this
-                  // blue
-                  Target8^ := ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z)));
-                  Inc(Target8);
-                  // green
-                  Target8^ := ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z)));
-                  Inc(Target8);
-                  // red
-                  Target8^ := ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z)));
-                  Inc(Target8, 1 + AlphaSkip);
+                  XYZToBGR(X, Y, Z, PBGR(Target8));
+                  Inc(Target8, 3 + AlphaSkip);
                 end
                 else
                   Inc(Target8, 3 + AlphaSkip);
@@ -2439,31 +2611,12 @@ begin
                     Inc(bRun8, Increment);
                   end;
 
-                  YYn3 := (L + 16) / 116; // This corresponds to (Y/Yn)^1/3
-                  if L < 7.9996 then
-                  begin
-                    Y := L / 903.3;
-                    X := a / 3893.5 + Y;
-                    Z := Y - b / 1557.4;
-                  end
-                  else
-                  begin
-                    T := YYn3 + a / 500;
-                    X := T * T * T;
-                    Y := YYn3 * YYn3 * YYn3;
-                    T := YYn3 - b / 200;
-                    Z := T * T * T;
-                  end;
+                  // Convert from CIE L*a*b* to CIE XYZ
+                  CIELabToXYZ(L, a, b, X, Y, Z);
 
-                  // blue
-                  Target16^ := MulDiv16(ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z))), 65535, 255);
-                  Inc(Target16);
-                  // green
-                  Target16^ := MulDiv16(ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z))), 65535, 255);
-                  Inc(Target16);
-                  // red
-                  Target16^ := MulDiv16(ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z))), 65535, 255);
-                  Inc(Target16, 1 + AlphaSkip);
+                  // Once we have CIE XYZ it is easy (yet quite expensive) to calculate RGB values from this
+                  XYZToBGR16(X, Y, Z, PBGR16(Target16));
+                  Inc(Target16, 3 + AlphaSkip);
                 end
                 else
                   Inc(Target16, 3 + AlphaSkip);
@@ -2473,7 +2626,7 @@ begin
             end;
         end;
       end;
-    16: 
+    16:
       begin
         if Length(Source) = 1 then
         begin
@@ -2499,51 +2652,33 @@ begin
                 if Boolean(Mask and BitRun) then
                 begin
                   if coLabByteRange in FSourceOptions then
-                    L := LRun16^ / 2.55
+                    L := LRun16^ / 655.35
                   else
                     L := LRun16^;
                   Inc(LRun16, Increment);
-                  
+
                   if coLabChromaOffset in FSourceOptions then
                   begin
-                    a := aRun16^ - 128;
+                    a := aRun16^ shr 8 - 128;
                     Inc(aRun16, Increment);
-                    b := bRun16^ - 128;
+                    b := bRun16^ shr 8 - 128;
                     Inc(bRun16, Increment);
                   end
                   else
                   begin
-                    a := ShortInt(aRun16^);
+                    // Need to convert to ShortInt since it should be in range -128 to 128
+                    a := ShortInt(aRun16^ shr 8); // MulDiv(aRun16^, 256, 65536);
                     Inc(aRun16, Increment);
-                    b := ShortInt(bRun16^);
+                    b := ShortInt(bRun16^ shr 8); // MulDiv(bRun16^, 256, 65536);
                     Inc(bRun16, Increment);
                   end;
 
-                  YYn3 := (L + 16) / 116; // This corresponds to (Y/Yn)^1/3
-                  if L < 7.9996 then
-                  begin
-                    Y := L / 903.3;
-                    X := a / 3893.5 + Y;
-                    Z := Y - b / 1557.4;
-                  end
-                  else
-                  begin
-                    T := YYn3 + a / 500;
-                    X := T * T * T;
-                    Y := YYn3 * YYn3 * YYn3;
-                    T := YYn3 - b / 200;
-                    Z := T * T * T;
-                  end;
+                  // Convert from CIE L*a*b* to CIE XYZ
+                  CIELabToXYZ(L, a, b, X, Y, Z);
 
-                  // blue
-                  Target8^ := ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z)));
-                  Inc(Target8);
-                  // green
-                  Target8^ := ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z)));
-                  Inc(Target8);
-                  // red
-                  Target8^ := ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z)));
-                  Inc(Target8, 1 + AlphaSkip);
+                  // Once we have CIE XYZ it is easy (yet quite expensive) to calculate RGB values from this
+                  XYZToBGR(X, Y, Z, PBGR(Target8));
+                  Inc(Target8, 3 + AlphaSkip);
                 end
                 else
                   Inc(Target8, 3 + AlphaSkip);
@@ -2559,50 +2694,32 @@ begin
                 if Boolean(Mask and BitRun) then
                 begin
                   if coLabByteRange in FSourceOptions then
-                    L := LRun16^ / 2.55
+                    L := LRun16^ / 655.35
                   else
                     L := LRun16^;
                   Inc(LRun16, Increment);
                   if coLabChromaOffset in FSourceOptions then
                   begin
-                    a := aRun16^ - 128;
+                    a := aRun16^ shr 8 - 128;
                     Inc(aRun16, Increment);
-                    b := bRun16^ - 128;
+                    b := bRun16^ shr 8 - 128;
                     Inc(bRun16, Increment);
                   end
                   else
                   begin
-                    a := ShortInt(aRun16^);
+                    // Need to convert to ShortInt since it should be in range -128 to 128
+                    a := ShortInt(aRun16^ shr 8);
                     Inc(aRun16, Increment);
-                    b := ShortInt(bRun16^);
+                    b := ShortInt(bRun16^ shr 8);
                     Inc(bRun16, Increment);
                   end;
 
-                  YYn3 := (L + 16) / 116; // This corresponds to (Y/Yn)^1/3
-                  if L < 7.9996 then
-                  begin
-                    Y := L / 903.3;
-                    X := a / 3893.5 + Y;
-                    Z := Y - b / 1557.4;
-                  end
-                  else
-                  begin
-                    T := YYn3 + a / 500;
-                    X := T * T * T;
-                    Y := YYn3 * YYn3 * YYn3;
-                    T := YYn3 - b / 200;
-                    Z := T * T * T;
-                  end;
+                  // Convert from CIE L*a*b* to CIE XYZ
+                  CIELabToXYZ(L, a, b, X, Y, Z);
 
-                  // blue
-                  Target16^ := ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z)));
-                  Inc(Target16);
-                  // green
-                  Target16^ := ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z)));
-                  Inc(Target16);
-                  // red
-                  Target16^ := ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z)));
-                  Inc(Target16, 1 + AlphaSkip);
+                  // Once we have CIE XYZ it is easy (yet quite expensive) to calculate RGB values from this
+                  XYZToBGR16(X, Y, Z, PBGR16(Target16));
+                  Inc(Target16, 3 + AlphaSkip);
                 end
                 else
                   Inc(Target16, 3 + AlphaSkip);
@@ -2629,9 +2746,7 @@ var
   aRun16,
   bRun16: PWord;
   L, a, b,
-  X, Y, Z, // Color values in float format
-  T,
-  YYn3: Extended;  // Intermediate results
+  X, Y, Z: Extended; // Color values in float format
   Target8: PByte;
   Target16: PWord;
   Increment: Integer;
@@ -2688,32 +2803,12 @@ begin
                     Inc(bRun8, Increment);
                   end;
 
-                  YYn3 := (L + 16) / 116; // This corresponds to (Y/Yn)^1/3
-                  if L < 7.9996 then
-                  begin
-                    Y := L / 903.3;
-                    X := a / 3893.5 + Y;
-                    Z := Y - b / 1557.4;
-                  end
-                  else
-                  begin
-                    T := YYn3 + a / 500;
-                    X := T * T * T;
-                    Y := YYn3 * YYn3 * YYn3;
-                    T := YYn3 - b / 200;
-                    Z := T * T * T;
-                  end;
+                  // Convert from CIE L*a*b* to CIE XYZ
+                  CIELabToXYZ(L, a, b, X, Y, Z);
 
                   // Once we have CIE XYZ it is easy (yet quite expensive) to calculate RGB values from this
-                  // red
-                  Target8^ := ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z)));
-                  Inc(Target8);
-                  // green
-                  Target8^ := ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z)));
-                  Inc(Target8);
-                  // blue
-                  Target8^ := ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z)));
-                  Inc(Target8, 1 + AlphaSkip);
+                  XYZToRGB(X, Y, Z, PRGB(Target8));
+                  Inc(Target8, 3 + AlphaSkip);
                 end
                 else
                   Inc(Target8, 3 + AlphaSkip);
@@ -2748,31 +2843,12 @@ begin
                     Inc(bRun8, Increment);
                   end;
 
-                  YYn3 := (L + 16) / 116; // This corresponds to (Y/Yn)^1/3
-                  if L < 7.9996 then
-                  begin
-                    Y := L / 903.3;
-                    X := a / 3893.5 + Y;
-                    Z := Y - b / 1557.4;
-                  end
-                  else
-                  begin
-                    T := YYn3 + a / 500;
-                    X := T * T * T;
-                    Y := YYn3 * YYn3 * YYn3;
-                    T := YYn3 - b / 200;
-                    Z := T * T * T;
-                  end;
+                  // Convert from CIE L*a*b* to CIE XYZ
+                  CIELabToXYZ(L, a, b, X, Y, Z);
 
-                  // red
-                  Target16^ := MulDiv16(ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z))), 65535, 255);
-                  Inc(Target16);
-                  // green
-                  Target16^ := MulDiv16(ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z))), 65535, 255);
-                  Inc(Target16);
-                  // blue
-                  Target16^ := MulDiv16(ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z))), 65535, 255);
-                  Inc(Target16, 1 + AlphaSkip);
+                  // Once we have CIE XYZ it is easy (yet quite expensive) to calculate RGB values from this
+                  XYZToRGB16(X, Y, Z, PRGB16(Target16));
+                  Inc(Target16, 3 + AlphaSkip);
                 end
                 else
                   Inc(Target16, 3 + AlphaSkip);
@@ -2808,50 +2884,33 @@ begin
                 if Boolean(Mask and BitRun) then
                 begin
                   if coLabByteRange in FSourceOptions then
-                    L := LRun16^ / 2.55
+                    L := LRun16^ / 655.35
                   else
                     L := LRun16^;
                   Inc(LRun16, Increment);
+
                   if coLabChromaOffset in FSourceOptions then
                   begin
-                    a := aRun16^ - 128;
+                    a := aRun16^ shr 8 - 128;
                     Inc(aRun16, Increment);
-                    b := bRun16^ - 128;
+                    b := bRun16^ shr 8 - 128;
                     Inc(bRun16, Increment);
                   end
                   else
                   begin
-                    a := ShortInt(aRun16^);
+                    // Need to convert to ShortInt since it should be in range -128 to 128
+                    a := ShortInt(aRun16^ shr 8);
                     Inc(aRun16, Increment);
-                    b := ShortInt(bRun16^);
+                    b := ShortInt(bRun16^ shr 8);
                     Inc(bRun16, Increment);
                   end;
 
-                  YYn3 := (L + 16) / 116; // This corresponds to (Y/Yn)^1/3
-                  if L < 7.9996 then
-                  begin
-                    Y := L / 903.3;
-                    X := a / 3893.5 + Y;
-                    Z := Y - b / 1557.4;
-                  end
-                  else
-                  begin
-                    T := YYn3 + a / 500;
-                    X := T * T * T;
-                    Y := YYn3 * YYn3 * YYn3;
-                    T := YYn3 - b / 200;
-                    Z := T * T * T;
-                  end;
+                  // Convert from CIE L*a*b* to CIE XYZ
+                  CIELabToXYZ(L, a, b, X, Y, Z);
 
-                  // red
-                  Target8^ := ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z)));
-                  Inc(Target8);
-                  // green
-                  Target8^ := ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z)));
-                  Inc(Target8);
-                  // blue
-                  Target8^ := ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z)));
-                  Inc(Target8, 1 + AlphaSkip);
+                  // Once we have CIE XYZ it is easy (yet quite expensive) to calculate RGB values from this
+                  XYZToRGB(X, Y, Z, PRGB(Target8));
+                  Inc(Target8, 3 + AlphaSkip);
                 end
                 else
                   Inc(Target8, 3 + AlphaSkip);
@@ -2867,50 +2926,32 @@ begin
                 if Boolean(Mask and BitRun) then
                 begin
                   if coLabByteRange in FSourceOptions then
-                    L := LRun16^ / 2.55
+                    L := LRun16^ / 655.35
                   else
                     L := LRun16^;
                   Inc(LRun16, Increment);
                   if coLabChromaOffset in FSourceOptions then
                   begin
-                    a := aRun16^ - 128;
+                    a := aRun16^ shr 8 - 128;
                     Inc(aRun16, Increment);
-                    b := bRun16^ - 128;
+                    b := bRun16^ shr 8 - 128;
                     Inc(bRun16, Increment);
                   end
                   else
                   begin
-                    a := ShortInt(aRun16^);
+                    // Need to convert to ShortInt since it should be in range -128 to 128
+                    a := ShortInt(aRun16^ shr 8);
                     Inc(aRun16, Increment);
-                    b := ShortInt(bRun16^);
+                    b := ShortInt(bRun16^ shr 8);
                     Inc(bRun16, Increment);
                   end;
 
-                  YYn3 := (L + 16) / 116; // This corresponds to (Y/Yn)^1/3
-                  if L < 7.9996 then
-                  begin
-                    Y := L / 903.3;
-                    X := a / 3893.5 + Y;
-                    Z := Y - b / 1557.4;
-                  end
-                  else
-                  begin
-                    T := YYn3 + a / 500;
-                    X := T * T * T;
-                    Y := YYn3 * YYn3 * YYn3;
-                    T := YYn3 - b / 200;
-                    Z := T * T * T;
-                  end;
+                  // Convert from CIE L*a*b* to CIE XYZ
+                  CIELabToXYZ(L, a, b, X, Y, Z);
 
-                  // red
-                  Target16^ := ClampByte(Round(255 * ( 2.998 * X - 1.458 * Y - 0.541 * Z)));
-                  Inc(Target16);
-                  // green
-                  Target16^ := ClampByte(Round(255 * (-0.952 * X + 1.893 * Y + 0.059 * Z)));
-                  Inc(Target16);
-                  // blue
-                  Target16^ := ClampByte(Round(255 * ( 0.099 * X - 0.198 * Y + 1.099 * Z)));
-                  Inc(Target16, 1 + AlphaSkip);
+                  // Once we have CIE XYZ it is easy (yet quite expensive) to calculate RGB values from this
+                  XYZToRGB16(X, Y, Z, PRGB16(Target16));
+                  Inc(Target16, 3 + AlphaSkip);
                 end
                 else
                   Inc(Target16, 3 + AlphaSkip);
@@ -2942,10 +2983,20 @@ begin
   BitRun := $80;
   AlphaSkip := Ord(coAlpha in FTargetOptions); // 0 if no alpha must be skipped, otherwise 1
 
+  if coSeparatePlanes in FSourceOptions then begin
+    // Separate planes
+    Increment := 1;
+  end
+  else begin
+    // Increment also needs to take into account that we might have unknown
+    // extrasamples
+    Increment := SourceSamplesPerPixel;
+  end;
+
   case FSourceBPS of
     8:
       begin
-        if Length(Source) in [4, 5] then
+        if coSeparatePlanes in FSourceOptions then
         begin
           // Plane mode
           C8 := Source[0];
@@ -2956,7 +3007,6 @@ begin
             A8 := Source[4]
           else
             A8 := nil;
-          Increment := 1;
         end
         else
         begin
@@ -2967,11 +3017,9 @@ begin
           K8 := Y8; Inc(K8);
           if coAlpha in FSourceOptions then begin
             A8 := K8; Inc(A8);
-            Increment := 5;
           end
           else begin
             A8 := nil;
-            Increment := 4;
           end;
         end;
 
@@ -3060,7 +3108,7 @@ begin
       end;
     16:
       begin
-        if Length(Source) in [4, 5] then
+        if coSeparatePlanes in FSourceOptions then
         begin
           // Plane mode
           C16 := Source[0];
@@ -3071,7 +3119,6 @@ begin
             A16 := Source[4]
           else
             A16 := nil;
-          Increment := 1;
         end
         else
         begin
@@ -3082,11 +3129,9 @@ begin
           K16 := Y16; Inc(K16);
           if coAlpha in FSourceOptions then begin
             A16 := K16; Inc(A16);
-            Increment := 5;
           end
           else begin
             A16 := nil;
-            Increment := 4;
           end;
         end;
 
@@ -3195,10 +3240,20 @@ begin
   BitRun := $80;
   AlphaSkip := Ord(coAlpha in FTargetOptions); // 0 if no alpha must be skipped, otherwise 1
 
+  if coSeparatePlanes in FSourceOptions then begin
+    // Separate planes
+    Increment := 1;
+  end
+  else begin
+    // Increment also needs to take into account that we might have unknown
+    // extrasamples
+    Increment := SourceSamplesPerPixel;
+  end;
+
   case FSourceBPS of
     8:
       begin
-        if Length(Source) in [4, 5] then
+        if coSeparatePlanes in FSourceOptions then
         begin
           // Plane mode
           C8 := Source[0];
@@ -3209,7 +3264,6 @@ begin
             A8 := Source[4]
           else
             A8 := nil;
-          Increment := 1;
         end
         else
         begin
@@ -3220,11 +3274,9 @@ begin
           K8 := Y8; Inc(K8);
           if coAlpha in FSourceOptions then begin
             A8 := K8; Inc(A8);
-            Increment := 5;
           end
           else begin
             A8 := nil;
-            Increment := 4;
           end;
         end;
 
@@ -3313,7 +3365,7 @@ begin
       end;
     16:
       begin
-        if Length(Source) in [4, 5] then
+        if coSeparatePlanes in FSourceOptions then
         begin
           // Plane mode
           C16 := Source[0];
@@ -3324,7 +3376,6 @@ begin
             A16 := Source[4]
           else
             A16 := nil;
-          Increment := 1;
         end
         else
         begin
@@ -3335,11 +3386,9 @@ begin
           K16 := Y16; Inc(K16);
           if coAlpha in FSourceOptions then begin
             A16 := K16; Inc(A16);
-            Increment := 5;
           end
           else begin
             A16 := nil;
-            Increment := 4;
           end;
         end;
 
@@ -3599,10 +3648,13 @@ var
 begin
   BitRun := $80;
   // When this is an image with alpha and not planar we need to skip the alpha bits
-  if (coAlpha in FSourceOptions) and not (coSeparatePlanes in FSourceOptions) then
+  // Tiff can have extrasamples that is not an alpha channel. That's why testing
+  // whether coAlpha is in FSourceOptions may fail in some rare cases.
+  // Thus we will check Source samples per pixel and skip anything above 1.
+  if (FSourceSPP > 1) and not (coSeparatePlanes in FSourceOptions) then
   begin
-    AlphaSkip := 1;
-    BitIncrement := 2*FSourceBPS; // Bits and alpha value
+    AlphaSkip := FSourceSPP - 1;
+    BitIncrement := FSourceSPP * FSourceBPS; // Bits and alpha value (and possibly extra samples)
   end
   else begin
     AlphaSkip := 0;
@@ -4119,20 +4171,64 @@ end;
 // Source Palette data and format should have been set using SetSourcePalette.
 // Index 0 in palette data should contain the red channel, 1 = green, 2 = blue.
 // Palette channel data as expected from TIF is always 16 bits.
+// pfPlane8Triple: PSD indexed
 // Mask is currently ignored here.
 procedure TColorManager.RowConvertIndexed2BGR(Source: array of Pointer; Target: Pointer; Count: Cardinal; Mask: Byte);
 var
   PalIndex8: Byte;
-  PalIndex: Cardinal;
+  PalIndex,
+  AlphaVal16: Cardinal;
   SourceRun8: PByte;
-  SourceRun16: PWord;
-  TargetRun8: PBGR;
+  SourceRun16,
+  SourceRun16A: PWord;
+  SourceRun8A: PByte;
+  TargetRun8: PBGRA;
   BitOffset: Cardinal;
+  AddAlpha,
+  CopyAlpha: Boolean;
+  SourceIncrement,
+  TargetIncrement: Integer;
 begin
   if Length(Source) = 0 then begin
     ShowError(gesSourcePaletteUndefined);
     Exit;
   end;
+  // Mainly support for 8 and 16 bits per sample
+  if not (FSourceBPS in [1..16]) then
+    Exit;
+
+  AddAlpha := False;
+  // Check how we need to handle alpha
+  if coAlpha in FSourceOptions then
+  begin
+    SourceIncrement := 2; // 1 indexed + 1 alpha
+    if coAlpha in FTargetOptions then begin
+      TargetIncrement := SizeOf(TBGRA);
+      CopyAlpha := True;
+    end
+    else begin
+      TargetIncrement := SizeOf(TBGR);
+      CopyAlpha := False;
+    end;
+  end
+  else
+  begin
+    SourceIncrement := 1; // 1 byte grayscale
+    if coAlpha in FTargetOptions then begin
+      TargetIncrement := SizeOf(TBGRA);
+      AddAlpha := True;
+    end
+    else
+      TargetIncrement := SizeOf(TBGR);
+    CopyAlpha := False;
+  end;
+  // In planar mode source increment is always 1
+  if coSeparatePlanes in FSourceOptions then
+    SourceIncrement := 1;
+  // Convert to number of bytes (Don't worry about FSourceBPS being a multiple of 8:
+  // SourceIncrement will not be used in those cases!)
+  SourceIncrement := FSourceBPS div 8 * SourceIncrement;
+
   case FSourcePaletteFormat of
     pfPlane16Triple,
     pfPlane16Quad:
@@ -4145,6 +4241,12 @@ begin
           8:
             begin
               SourceRun8 := Source[0]; // Palette indexes
+              if Length(Source) = 1 then begin
+                SourceRun8A := SourceRun8; Inc(SourceRun8A);
+              end
+              else begin
+                SourceRun8A := Source[1];
+              end;
               TargetRun8 := Target;
 
               while Count > 0 do
@@ -4156,8 +4258,24 @@ begin
                 TargetRun8^.B := ComponentScaleConvert16To8(PWordArray(FSourcePaletteData[2])^[PalIndex8]);
                 TargetRun8^.G := ComponentScaleConvert16To8(PWordArray(FSourcePaletteData[1])^[PalIndex8]);
                 TargetRun8^.R := ComponentScaleConvert16To8(PWordArray(FSourcePaletteData[0])^[PalIndex8]);
-                Inc(SourceRun8);
-                Inc(TargetRun8);
+
+                // Handle alpha channel
+                if CopyAlpha then begin
+                  TargetRun8^.A := SourceRun8A^;
+                end
+                else if AddAlpha then begin
+                  if FSourcePaletteFormat = pfPlane16Quad then begin
+                    // Palette also holds alpha, use that for adding alpha.
+                    // NB! Untested since I don't have any samples using this!
+                    TargetRun8^.A := ComponentScaleConvert16To8(PWordArray(FSourcePaletteData[3])^[SourceRun8A^]);
+                  end
+                  else
+                    TargetRun8^.A := $ff;
+                end;
+
+                Inc(SourceRun8, SourceIncrement);
+                Inc(SourceRun8A, SourceIncrement);
+                Inc(PByte(TargetRun8), TargetIncrement);
 
                 Dec(Count);
               end;
@@ -4165,6 +4283,12 @@ begin
           16:
             begin
               SourceRun16 := Source[0]; // Palette indexes
+              if Length(Source) = 1 then begin
+                SourceRun16A := SourceRun16; Inc(SourceRun16A);
+              end
+              else begin
+                SourceRun16A := Source[1];
+              end;
               TargetRun8 := Target;
 
               while Count > 0 do
@@ -4179,14 +4303,34 @@ begin
                 TargetRun8^.B := ComponentScaleConvert16To8(PWordArray(FSourcePaletteData[2])^[PalIndex]);
                 TargetRun8^.G := ComponentScaleConvert16To8(PWordArray(FSourcePaletteData[1])^[PalIndex]);
                 TargetRun8^.R := ComponentScaleConvert16To8(PWordArray(FSourcePaletteData[0])^[PalIndex]);
-                Inc(SourceRun16);
-                Inc(TargetRun8);
+
+                // Handle alpha channel
+                if CopyAlpha then begin
+                  if coNeedByteSwap in FSourceOptions then
+                    AlphaVal16 := Swap(SourceRun16A^)
+                  else
+                    AlphaVal16 := SourceRun16A^;
+                  TargetRun8^.A := ComponentScaleConvert16To8(AlphaVal16);
+                end
+                else if AddAlpha then begin
+                  if FSourcePaletteFormat = pfPlane16Quad then begin
+                    // Palette also holds alpha, use that for adding alpha.
+                    // NB! Untested since I don't have any samples using this!
+                    TargetRun8^.A := ComponentScaleConvert16To8(PWordArray(FSourcePaletteData[3])^[PalIndex]);
+                  end
+                  else
+                    TargetRun8^.A := $ff;
+                end;
+
+                Inc(PByte(SourceRun16), SourceIncrement);
+                Inc(PByte(SourceRun16A), SourceIncrement);
+                Inc(PByte(TargetRun8), TargetIncrement);
 
                 Dec(Count);
               end;
             end;
           1..7,
-          9..15: // Uncommon and unlikely to encounter
+          9..15: // See GraphicsMagic test images.
             begin
               SourceRun16 := Source[0]; // Palette indexes
               TargetRun8 := Target;
@@ -4206,7 +4350,51 @@ begin
                 TargetRun8^.B := ComponentScaleConvert16To8(PWordArray(FSourcePaletteData[2])^[PalIndex]);
                 TargetRun8^.G := ComponentScaleConvert16To8(PWordArray(FSourcePaletteData[1])^[PalIndex]);
                 TargetRun8^.R := ComponentScaleConvert16To8(PWordArray(FSourcePaletteData[0])^[PalIndex]);
-                Inc(TargetRun8);
+                // We are ignoring alpha channels here.
+                Inc(PByte(TargetRun8), SizeOf(TBGR));
+
+                Dec(Count);
+              end;
+            end;
+        end;
+      end;
+    pfPlane8Triple:
+      begin
+        if Length(FSourcePaletteData) <> 3 then begin
+          ShowError(gesIncorrectPaletteDataCount);
+          Exit;
+        end;
+        case FSourceBPS of
+          8:
+            begin
+              SourceRun8 := Source[0]; // Palette indexes
+              if Length(Source) = 1 then begin
+                SourceRun8A := SourceRun8; Inc(SourceRun8A);
+              end
+              else begin
+                SourceRun8A := Source[1];
+              end;
+              TargetRun8 := Target;
+
+              while Count > 0 do
+              begin
+                // Get palette index
+                PalIndex8 := SourceRun8^;
+
+                // Store color info from palette index in Target
+                TargetRun8^.B := PByteArray(FSourcePaletteData[2])^[PalIndex8];
+                TargetRun8^.G := PByteArray(FSourcePaletteData[1])^[PalIndex8];
+                TargetRun8^.R := PByteArray(FSourcePaletteData[0])^[PalIndex8];
+                // Handle alpha
+                if CopyAlpha then
+                  TargetRun8^.A := SourceRun8A^
+                else if AddAlpha then
+                  // Source has no alpha but target needs alpha, set it to $ff
+                  TargetRun8^.A := $ff;
+
+                Inc(SourceRun8, SourceIncrement);
+                Inc(SourceRun8A, SourceIncrement);
+                Inc(PByte(TargetRun8), TargetIncrement);
 
                 Dec(Count);
               end;
@@ -4215,6 +4403,102 @@ begin
       end;
   else
     ShowError(gesPaletteFormatConversionUnsupported);
+  end;
+end;
+
+//------------------------------------------------------------------------------
+
+// Convert Grayscale(A) to BGR(A).
+// Source: Currently only 8 bits grayscale with optional 8 bits alpha
+// Mask is currently ignored.
+// Target BGR(A) = 24/32 bits only at the moment.
+procedure TColorManager.RowConvertGray2BGR(Source: array of Pointer; Target: Pointer; Count: Cardinal; Mask: Byte);
+var
+  SourceRun8: PByte;
+  SourceAlphaRun8: PByte;
+  TargetRun8: PBGRA;
+  GrayValue8: Byte;
+  CopyAlpha,
+  AddAlpha: Boolean;
+  SourceIncrement,
+  TargetIncrement: Integer;
+begin
+  if Length(Source) = 0 then begin
+    ShowError(gesSourcePaletteUndefined);
+    Exit;
+  end;
+
+  if not (coSeparatePlanes in FSourceOptions) then
+    // Since Tiff can have undetermined extra samples we need to use the correct SourceIncrement
+    SourceIncrement := FSourceSPP
+  else
+    // In planar mode source increment is always 1
+    SourceIncrement := 1;
+
+  AddAlpha := False;
+  // Check how we need to handle alpha
+  if coAlpha in FSourceOptions then
+  begin
+    if coAlpha in FTargetOptions then begin
+      TargetIncrement := SizeOf(TBGRA);
+      CopyAlpha := True;
+    end
+    else begin
+      TargetIncrement := SizeOf(TBGR);
+      CopyAlpha := False;
+    end;
+  end
+  else
+  begin
+    if coAlpha in FTargetOptions then begin
+      TargetIncrement := SizeOf(TBGRA);
+      AddAlpha := True;
+    end
+    else
+      TargetIncrement := SizeOf(TBGR);
+    CopyAlpha := False;
+  end;
+
+  case FSourceBPS of
+    8:
+      begin
+        // Currently only 8BPS target supported.
+        if FTargetBPS <> 8 then
+          Exit;
+        // Set up source and target pointers
+        SourceRun8 := Source[0]; // Grayscale source
+        if Length(Source) = 1 then begin
+          SourceAlphaRun8 := SourceRun8; Inc(SourceAlphaRun8);
+        end
+        else begin
+          // Length of source assumed to be 2. No checking necessary: in case
+          // there are more values those pointers will just be ignored.
+          SourceAlphaRun8 := Source[1];
+        end;
+        TargetRun8 := Target;
+
+        while Count > 0 do
+        begin
+          // Get grayscale index
+          GrayValue8 := SourceRun8^;
+
+          // Store grayscale info from palette index in Target
+          TargetRun8^.B := GrayValue8;
+          TargetRun8^.G := GrayValue8;
+          TargetRun8^.R := GrayValue8;
+          if CopyAlpha then
+            TargetRun8^.A := SourceAlphaRun8^
+          else if AddAlpha then
+            // Source has no alpha but target needs alpha, set it to $ff
+            TargetRun8^.A := $ff;
+
+          Inc(SourceRun8, SourceIncrement);
+          Inc(SourceAlphaRun8, SourceIncrement);
+          Inc(PByte(TargetRun8), TargetIncrement);
+
+          Dec(Count);
+        end;
+      end;
   end;
 end;
 
@@ -4282,13 +4566,20 @@ var
 
 begin
   BitRun := $80;
+
+  if not (coSeparatePlanes in FSourceOptions) then
+    // Since Tiff can have undetermined extra samples we need to use the correct SourceIncrement
+    SourceIncrement := FSourceSPP
+  else
+    // In planar mode source increment is always 1
+    SourceIncrement := 1;
+
   // Determine alpha handling once
   CopyAlpha := False;
   if coAlpha in FSourceOptions then
   begin
     // Byte size of components doesn't matter as the increments are applied to
     // pointers whose data types determine the final increment
-    SourceIncrement := SizeOf(TRGBA);
     TargetIncrement := SizeOf(TRGB);
     if coAlpha in FTargetOptions then
       CopyAlpha := True;
@@ -4296,16 +4587,12 @@ begin
   end
   else
   begin
-    SourceIncrement := SizeOf(TRGB);
     if coAlpha in FTargetOptions then
       TargetIncrement := SizeOf(TRGBA)
     else
       TargetIncrement := SizeOf(TRGB);
     AlphaSkip := 0;
   end;
-  // In planar mode source increment is always 1
-  if Length(Source) > 1 then
-    SourceIncrement := 1;
 
   case FSourceBPS of
     8:
@@ -6620,11 +6907,6 @@ procedure TColorManager.PrepareConversion;
 begin
   FRowConversion := nil;
 
-  // Grayscale conversion to non indexed is not yet supported.
-  // csGA and csG (grayscale w and w/o alpha) are considered being indexed modes
-  if (FSourceScheme in [csG, csGA]) and not (FTargetScheme  in [csG, csGA, csIndexed, csIndexedA]) then
-    ShowError(gesGrayscale2NonIndexedNotSupported);
-
   // Conversion of non indexed to indexed is also not supported.
   if (FTargetScheme in [csIndexed, csIndexedA]) and not (FSourceScheme in [csG, csGA, csIndexed, csIndexedA]) then
     ShowError(gesIndexedNotSupported);
@@ -6648,8 +6930,17 @@ begin
       else
         FRowConversion := RowConvertIndexed8;
     csGA:
-      if (FSourceBPS in [5..16]) and (FTargetBPS in [8, 16]) then
-        FRowConversion := RowConvertGray;
+      case FTargetScheme of
+        csBGR,
+        csBGRA,
+        csRGB,
+        csRGBA:
+          if (FTargetBPS = 8) and (FSourceBPS = 8) then
+            FRowConversion := RowConvertGray2BGR;
+      else
+        if (FSourceBPS in [5..16]) and (FTargetBPS in [8, 16]) then
+          FRowConversion := RowConvertGray;
+      end;
     csIndexed:
       begin
         case FTargetScheme of
@@ -6672,17 +6963,27 @@ begin
                 else
                   if FTargetBPS = 16 then
                     FRowConversion := RowConvertIndexedTarget16
+                  else if FSourceSPP = FTargetSPP then
+                    FRowConversion := RowConvertIndexed8
                   else
-                    FRowConversion := RowConvertIndexed8;
+                    // Tiff extrasamples > 0 but apparently not a normal alpha channel
+                    FRowConversion := RowConvertGray;
             end;
         end; // case
       end;
     csIndexedA:
       begin
-        // Indexed with alpha is like Grayscale with alpha: meaning that
-        // currently alpha is ignored/skipped on conversion
-        if (FSourceBPS = 8) and (FTargetBPS = 8) then
-          FRowConversion := RowConvertGray;
+        case FTargetScheme of
+          csBGR,
+          csBGRA,
+          csRGB,
+          csRGBA:
+            if (FTargetBPS = 8) and (FSourceBPS = 8) then
+              FRowConversion := RowConvertIndexed2BGR;
+        else
+          if (FSourceBPS = 8) and (FTargetBPS = 8) then
+            FRowConversion := RowConvertGray;
+        end;
       end;
     csRGB,
     csRGBA:
@@ -6816,7 +7117,9 @@ end;
 procedure TColorManager.SetSourceSamplesPerPixel(const Value: Byte);
 
 begin
-  if not (Value in [1..5]) then
+  // Since some image formats allow extra samples not directly corresponding to
+  // image data we can't check a maximum number of samples per pixel.
+  if Value = 0 then
     ShowError(gesInvalidPixelDepth);
   if FSourceSPP <> Value then
   begin

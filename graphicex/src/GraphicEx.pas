@@ -438,9 +438,11 @@ type
     FPaletteFile: string;
   protected
     procedure LoadPalette;
+    procedure SetDefaultPaletteFile(const FileName: string);
   public
     class function CanLoad(const Memory: Pointer; Size: Int64): Boolean; override;
     procedure LoadFromFile(const FileName: string); override;
+    procedure LoadFromFileByIndex(const FileName: string; ImageIndex: Cardinal = 0); override;
     procedure LoadFromMemory(const Memory: Pointer; Size: Int64; ImageIndex: Cardinal = 0); override;
     function ReadImageProperties(const Memory: Pointer; Size: Int64; ImageIndex: Cardinal): Boolean; override;
 
@@ -1805,6 +1807,9 @@ begin
           TargetColorScheme := csIndexed;
         end;
         PixelFormat := TargetPixelFormat;
+        // Uses separate channels thus we need to set that in source options.
+        // Grayscale will only be 1 channel but it's not using the ColorManger for conversion.
+        ColorManager.SourceOptions := ColorManager.SourceOptions + [coSeparatePlanes];
       end;
       Self.Width := Width;
       Self.Height := Height;
@@ -2428,13 +2433,19 @@ begin
 
           ColorManager.SourceColorScheme := ColorScheme;
           ColorManager.SourceDataFormat := TSampleDataFormat(SampleFormat);
+          // If Tiff uses separate planes we need to add that to our source options
+          if ioSeparatePlanes in Options then
+            ColorManager.SourceOptions := ColorManager.SourceOptions + [coSeparatePlanes];
+
           // Split loading image data depending on pixel depth.
           // ReadRGBA only handles 1, 2, 4, 8 and 16 bits per sample, however
           // 1, 2 and 4 bits apparently only for Indexed/Grayscale
           if ((SamplesPerPixel in [3, 4]) and (BitsPerSample in [8, 16]) and
              (SampleFormat in [SAMPLEFORMAT_UINT, SAMPLEFORMAT_INT, SAMPLEFORMAT_VOID])
-             and not (ioSeparatePlanes in Options) and not (ColorScheme in [csCMYK, csCMYKA])) or
-             ((SamplesPerPixel in [1,2]) and not (ColorScheme in [csG, csGA, csIndexed, csIndexedA, csCIELab])) then begin
+             and not (ioSeparatePlanes in Options) and
+             not (ColorScheme in [csCMYK, csCMYKA, csCIELAB, csUnknown])) or
+             ((SamplesPerPixel in [1, 2]) and not ((ColorScheme in [csG, csGA,
+             csIndexed, csIndexedA, csCIELAB, csUnknown]))) then begin
              // Generic RGBA reading interface
             if (Height > 0) and (Width > 0) then
             begin
@@ -2511,12 +2522,21 @@ begin
               ColorManager.TargetSamplesPerPixel := SamplesPerPixel;
               if ioSeparatePlanes in Options then begin
                 // Only possible for Grayscale or Indexed with alpha.
-                // Since we're currently not handling the alpha in these cases
-                // we're going to remove planar and reduce SamplesPerPixel.
-                ColorManager.TargetSamplesPerPixel := SamplesPerPixel - 1;
                 ColorManager.SourceOptions := ColorManager.SourceOptions + [coSeparatePlanes];
               end;
-              ColorManager.TargetColorScheme := csIndexed;
+              if (SamplesPerPixel > 1) and not HasAlpha then begin
+                // There are extra samples but apparently not a normal alpha channel.
+                // We need to make sure these extra samples get skipped.
+                ColorManager.TargetSamplesPerPixel := 1;
+              end;
+
+              if (ColorScheme = csGA) and (BitsPerSample = 8) then begin
+                // Need to convert to BGRA to be able to show alpha
+                ColorManager.TargetColorScheme := csBGRA;
+                ColorManager.TargetSamplesPerPixel := 4;
+              end
+              else
+                ColorManager.TargetColorScheme := csIndexed;
             end
             else begin
               // Assume we want BGR(A) for everything else
@@ -2536,16 +2556,10 @@ begin
                 ColorManager.TargetColorScheme := csBGR;
 
               case ColorScheme of
-                csCMYK, csCMYKA:
-                  // CMYK(A) is using 4(5) samples without alpha where BGR/RGB has 3
-                  ColorManager.TargetSamplesPerPixel := SamplesPerPixel-1;
                 csCIELab:
                   begin
                     if SamplesPerPixel >= 3 then begin
-                      // Currently not used since it seems our CIELAB to BGR conversion
-                      // seems to be more red than libtif's conversion and IrfanView.
-                      // Investigate if and how we can use libtif's own conversion functions.
-                      ColorManager.TargetSamplesPerPixel := SamplesPerPixel;
+                      ColorManager.TargetSamplesPerPixel := 3;
                       ColorManager.SourceOptions := ColorManager.SourceOptions +
                         [coLabByteRange];
                     end
@@ -2557,8 +2571,35 @@ begin
                       Include(Options, ioMinIsWhite);
                     end;
                   end;
+                csUnknown: // Do a simple guess what color scheme it could be.
+                  begin
+                    if BitsPerSample in [8, 16] then
+                      case SamplesPerPixel of
+                        1:
+                          begin
+                            ColorManager.SourceColorScheme := csG;
+                            ColorManager.TargetColorScheme := csG;
+                          end;
+                        3:
+                          begin
+                            ColorManager.SourceColorScheme := csRGB;
+                            ColorManager.TargetColorScheme := csBGR;
+                          end;
+                        4:
+                          begin
+                            ColorManager.SourceColorScheme := csRGBA;
+                            ColorManager.TargetColorScheme := csBGRA;
+                          end;
+                      end;
+                  end;
               else
-                ColorManager.TargetSamplesPerPixel := SamplesPerPixel;
+                // Tiff can have extra samples that are not normal alpha channels.
+                // Catch those so we can interpret it at least partially.
+                // That is the reason that we use explicit numbers here and not SamplesPerPixel.
+                if HasAlpha then
+                  ColorManager.TargetSamplesPerPixel := 4
+                else
+                  ColorManager.TargetSamplesPerPixel := 3;
               end;
             end;
 
@@ -2608,7 +2649,8 @@ begin
             else if (ColorScheme in [csG, csGA]) or (ColorManager.TargetColorScheme in [csG, csGA]) then
             begin
               // Gray scale image data.
-              Palette := ColorManager.CreateGrayscalePalette(ioMinIsWhite in Options);
+              if ColorManager.TargetColorScheme in [csG, csGA, csIndexed, csIndexedA] then
+                Palette := ColorManager.CreateGrayscalePalette(ioMinIsWhite in Options);
             end;
 
             StartProgressSection(0, gesLoadingData);
@@ -2716,7 +2758,7 @@ begin
         {$endif DELPHI_7_UP}
 
         // Determine whether extra samples must be considered.
-        HasAlpha := (ExtraSamples = 1) and
+        HasAlpha := (ExtraSamples >= 1) and
           (SampleInfo^ in [EXTRASAMPLE_ASSOCALPHA, EXTRASAMPLE_UNASSALPHA]);
 
         // SampleFormat determines DataType of samples (default = unsigned int)
@@ -3082,7 +3124,7 @@ begin
           // by 15/16 bits color map entries. However since it is planned to move
           // that code to the ColorManager to we will leave this as is since it
           // will be needed there too after the move.
-          ColorMapBufSize := (FTargaHeader.ColorMapEntrySize div 8) * FTargaHeader.ColorMapSize;
+          ColorMapBufSize := ((FTargaHeader.ColorMapEntrySize + 7) div 8) * FTargaHeader.ColorMapSize;
           GetMem(ColorMapBuffer, ColorMapBufSize);
           try
             Move(Source^, ColorMapBuffer^, ColorMapBufSize);
@@ -3134,7 +3176,8 @@ begin
       Self.Width := FTargaHeader.Width;
       Self.Height := FTargaHeader.Height;
 
-      LineSize := Width * (FTargaHeader.PixelSize div 8);
+      // Compute size in bytes of one line of the image.
+      LineSize := Width * ((FTargaHeader.PixelSize+7) div 8);
       Progress(Self, psEnding, 0, False, FProgressRect, '');
 
       Progress(Self, psStarting, 0, False, FProgressRect, gesTransfering);
@@ -3419,7 +3462,7 @@ begin
       end;
     end;
 
-    LineSize := Width * (Header.PixelSize div 8);
+    LineSize := Width * ((Header.PixelSize + 7) div 8);
     Progress(Self, psEnding, 0, False, FProgressRect, '');
 
     Progress(Self, psStarting, 0, False, FProgressRect, gesTransfering);
@@ -3469,9 +3512,10 @@ type
   PPCXHeader = ^TPCXHeader;
   TPCXHeader = record
     FileID: Byte;                      // $0A for PCX files, $CD for SCR files
-    Version: Byte;                     // 0: version 2.5; 2: 2.8 with palette; 3: 2.8 w/o palette; 5: version 3
+    Version: Byte;                     // 0: version 2.5; 2: 2.8 with palette; 3: 2.8 w/o palette; 5: version 3;
+                                       // 4: PC Paintbrush for Windows; 5: PC Paintbrush +, Publisher's Paintbrush
     Encoding: Byte;                    // 0: uncompressed; 1: RLE encoded
-    BitsPerPixel: Byte;
+    BitsPerPixel: Byte;                // Number of bits to represent a pixel (per Plane) - 1, 2, 4, or 8
     XMin,
     YMin,
     XMax,
@@ -3480,10 +3524,12 @@ type
     VRes: Word;                        // vertical resolution in dpi
     ColorMap: array[0..15] of TRGB;    // color table
     Reserved,
-    ColorPlanes: Byte;                 // color planes (at most 4)
-    BytesPerLine,                      // number of bytes of one line of one plane
-    PaletteType: Word;                 // 1: color or b&w; 2: gray scale
-    Fill: array[0..57] of Byte;
+    ColorPlanes: Byte;                 // color planes (1, 3 or 4)
+    BytesPerLine,                      // number of bytes of one line of one plane (must be an even number)
+    PaletteType: Word;                 // 1: color or b&w; 2: gray scale (ignored in PB IV/ IV +)
+    HscreenSize: Word;                 // Horizontal screen size in pixels. New field found only in PB IV/IV Plus
+    VscreenSize: Word;                 // Vertical screen size in pixels. New field found only in PB IV/IV Plus
+    Fill: array[0..53] of Byte;
   end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -3495,7 +3541,8 @@ begin
   if Result then
     with PPCXHeader(Memory)^ do
     begin
-      Result := (FileID in [$0A, $0C]) and (Version in [0, 2, 3, 5]) and (Encoding in [0, 1]);
+      Result := (FileID in [$0A, $CD]) and (Version in [0, 2..5]) and
+        (Encoding in [0, 1]) and (BitsPerPixel in [1, 2, 4, 8]);
     end;
 end;
 
@@ -3570,7 +3617,6 @@ var
   I, J: Integer;
   Line: PByte;
   Increment: Integer;
-  NewPixelFormat: TPixelFormat;
 
 begin
   inherited;
@@ -3588,40 +3634,46 @@ begin
       if not (FileID in [$0A, $CD]) then
         GraphicExError(gesInvalidImage, ['PCX, PCC or SCR']);
 
-      with ColorManager do
-      begin
-        SourceColorScheme := ColorScheme;
-        SourceBitsPerSample := BitsPerSample;
-        SourceSamplesPerPixel := SamplesPerPixel;
-        if ColorScheme = csIndexed then
-          TargetColorScheme := csIndexed
+      ColorManager.SourceColorScheme := ColorScheme;
+      ColorManager.SourceBitsPerSample := BitsPerSample;
+      ColorManager.SourceSamplesPerPixel := SamplesPerPixel;
+      if ColorScheme = csIndexed then
+        ColorManager.TargetColorScheme := csIndexed
+      else begin
+        if ColorManager.SourceSamplesPerPixel = 3 then
+          ColorManager.TargetColorScheme := csBGR
         else
-          TargetColorScheme := csBGR;
-        if BitsPerPixel = 2 then
-          TargetBitsPerSample := 4
-        else
-          TargetBitsPerSample := BitsPerSample;
-        // Note: pixel depths of 2 and 4 bits may not be used with more than one plane
-        //       otherwise the image will not show up correctly
-        TargetSamplesPerPixel := SamplesPerPixel;
+          ColorManager.TargetColorScheme := csBGRA;
+        ColorManager.SourceOptions := ColorManager.SourceOptions + [coSeparatePlanes];
       end;
+      ColorManager.TargetSamplesPerPixel := SamplesPerPixel;
+      if (ColorManager.SourceSamplesPerPixel in [3, 4]) then
+        if ColorScheme = csIndexed then begin
+          // Should be 1 bits per pixel x 4 planes special PCX case
+          ColorManager.TargetBitsPerSample := 4;
+          ColorManager.TargetSamplesPerPixel := 1;
+          // To be able to get a correct palette source bits per sample also needs to be 4.
+          ColorManager.SourceBitsPerSample := 4;
+        end
+        else begin
+          // Use 8 bits per samples since we don't have a converter yet to 5 bits in ColorManager.
+          ColorManager.TargetBitsPerSample := 8;
+          // Separate channels thus we need to set that in source options.
+          ColorManager.SourceOptions := ColorManager.SourceOptions + [coSeparatePlanes];
+        end
+      else if BitsPerPixel = 2 then
+        ColorManager.TargetBitsPerSample := 4
+      else
+        ColorManager.TargetBitsPerSample := BitsPerSample;
 
-      NewPixelFormat := ColorManager.TargetPixelFormat;
-      if NewPixelFormat = pfCustom then
-      begin
-        // There can be a special case comprising 4 planes each with 1 bit.
-        if (SamplesPerPixel = 4) and (BitsPerPixel = 4) then
-          NewPixelFormat := pf4Bit
-        else
-          GraphicExError(gesInvalidColorFormat, ['PCX']);
-      end;
+      // Set image pixel format
+      PixelFormat := ColorManager.TargetPixelFormat;
 
-      PixelFormat := NewPixelFormat;
       // 256 colors palette is appended to the actual PCX data.
       PCXSize := Size;
       if PixelFormat = pf8Bit then
         Dec(PCXSize, 769);
-      if PixelFormat <> pf24Bit then
+      if PixelFormat in [pf1Bit, pf4Bit, pf8Bit] then
         MakePalette;
 
       Self.Width := Width;
@@ -3661,9 +3713,9 @@ begin
           for I := 0 to Height - 1 do
           begin
             Plane1 := Run;
-            Plane2 := PByte(PAnsiChar(Run) + Increment div 4);
-            Plane3 := PByte(PAnsiChar(Run) + 2 * (Increment div 4));
-            Plane4 := PByte(PAnsiChar(Run) + 3 * (Increment div 4));
+            Plane2 := PByte(PAnsiChar(Run) + Header.BytesPerLine);
+            Plane3 := PByte(PAnsiChar(Run) + 2 * Header.BytesPerLine);
+            Plane4 := PByte(PAnsiChar(Run) + 3 * Header.BytesPerLine);
 
             Line := ScanLine[I];
             // number of bytes to write
@@ -3716,25 +3768,52 @@ begin
           end;
         end
         else
-          if PixelFormat = pf24Bit then
-          begin
-            // true color
-            for I := 0 to Height - 1 do
-            begin
-              Line := ScanLine[I];
-              Plane1 := Run;
-              Plane2 := PByte(PAnsiChar(Run) + Increment div 3);
-              Plane3 := PByte(PAnsiChar(Run) + 2 * (Increment div 3));
-              ColorManager.ConvertRow([Plane1, Plane2, Plane3], Line, Width, $FF);
-              Inc(Run, Increment);
+          case SamplesPerPixel of
+            3:  // RGB 3 planes
+              begin
+                if BitsPerPixel >= 8 then begin
+                  Plane1 := Run;
+                  Plane2 := PByte(PAnsiChar(Run) + Header.BytesPerLine);
+                  Plane3 := PByte(PAnsiChar(Run) + 2 * Header.BytesPerLine);
+                end
+                else begin
+                  // For some reason 3 planes x 1 pixel has different order of rgb.
+                  Plane3 := Run;
+                  Plane2 := PByte(PAnsiChar(Run) + Header.BytesPerLine);
+                  Plane1 := PByte(PAnsiChar(Run) + 2 * Header.BytesPerLine);
+                end;
+                for I := 0 to Height - 1 do
+                begin
+                  Line := ScanLine[I];
+                  ColorManager.ConvertRow([Plane1, Plane2, Plane3], Line, Width, $FF);
+                  Inc(Plane1, Increment);
+                  Inc(Plane2, Increment);
+                  Inc(Plane3, Increment);
 
-              Progress(Self, psRunning, MulDiv(I, 100, Height), True, FProgressRect, '');
-              OffsetRect(FProgressRect, 0, 1);
-            end
-          end
-          else
-          begin
-            // other indexed formats
+                  Progress(Self, psRunning, MulDiv(I, 100, Height), True, FProgressRect, '');
+                  OffsetRect(FProgressRect, 0, 1);
+                end;
+              end;
+            4:  // RGBA 4 planes (most likely never used in PCX)
+              begin
+                Plane1 := Run;
+                Plane2 := PByte(PAnsiChar(Run) + Header.BytesPerLine);
+                Plane3 := PByte(PAnsiChar(Run) + 2 * Header.BytesPerLine);
+                Plane4 := PByte(PAnsiChar(Run) + 3 * Header.BytesPerLine);
+                for I := 0 to Height - 1 do
+                begin
+                  Line := ScanLine[I];
+                  ColorManager.ConvertRow([Plane1, Plane2, Plane3, Plane4], Line, Width, $FF);
+                  Inc(Plane1, Increment);
+                  Inc(Plane2, Increment);
+                  Inc(Plane3, Increment);
+                  Inc(Plane4, Increment);
+
+                  Progress(Self, psRunning, MulDiv(I, 100, Height), True, FProgressRect, '');
+                  OffsetRect(FProgressRect, 0, 1);
+                end;
+              end;
+          else // indexed formats
             for I := 0 to Height - 1 do
             begin
               Line := ScanLine[I];
@@ -3779,10 +3858,19 @@ begin
         SamplesPerPixel := Header.ColorPlanes;
         BitsPerSample := Header.BitsPerPixel;
         BitsPerPixel := BitsPerSample * SamplesPerPixel;
-        if BitsPerPixel <= 8 then
-          ColorScheme := csIndexed
+
+        case Header.ColorPlanes of
+          1: ColorScheme := csIndexed;
+          3: ColorScheme := csRGB;
+          4: if Header.BitsPerPixel = 1 then
+               // Special PCX case
+               ColorScheme := csIndexed
+             else
+               ColorScheme := csRGBA;
         else
-          ColorScheme := csRGB;
+          ColorScheme := csUnknown;
+        end;
+
         if Header.Encoding = 1 then
           Compression := ctRLE
         else
@@ -4572,12 +4660,25 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
+// Set Default name of Palette file unless FPaletteFile already has a name
+procedure TCUTGraphic.SetDefaultPaletteFile(const FileName: string);
+begin
+  if FPaletteFile = '' then
+    FPaletteFile := ChangeFileExt(FileName, '.pal');
+end;
+
 procedure TCUTGraphic.LoadFromFile(const FileName: string);
 
 // Overridden to extract an implicit palette file name.
 
 begin
-  FPaletteFile := ChangeFileExt(FileName, '.pal');
+  SetDefaultPaletteFile(FileName);
+  inherited;
+end;
+
+procedure TCUTGraphic.LoadFromFileByIndex(const FileName: string; ImageIndex: Cardinal = 0);
+begin
+  SetDefaultPaletteFile(FileName);
   inherited;
 end;
 
@@ -5280,6 +5381,8 @@ begin
           TargetOptions := TargetOptions + [coApplyGamma];
           Include(Options, ioUseGamma);
         end;
+        // Uses separate channels thus we need to set that in source options.
+        ColorManager.SourceOptions := ColorManager.SourceOptions + [coSeparatePlanes];
       end;
 
       // dimension of image, top might be larger than bottom denoting a bottom up image
@@ -5870,8 +5973,9 @@ procedure TPSDGraphic.CombineChannels(Layer: TPhotoshopLayer);
   //---------------------------------------------------------------------------
 
 var
-  RunR, RunG, RunB, RunA: PByte;
-  Y: Integer;
+  RunR, RunG, RunB, RunA, RunCMYKA: PByte;
+  RunChannels: array of Pointer;
+  Y, I: Integer;
   ChannelSize: Integer;
 
 begin
@@ -5879,7 +5983,7 @@ begin
   begin
     ChannelSize := Width * Height;
     case PixelFormat of
-      pf8Bit: // Alpha channel for gray scale images is currently ignored.
+      pf8Bit:
         begin
           RunR := GetChannel(0);
           for Y := 0 to Height - 1 do
@@ -5888,8 +5992,10 @@ begin
             Inc(RunR, Width);
           end;
         end;
-      pf24Bit: // RGB or Lab
+      pf24Bit: // RGB, CMYK or Lab
         begin
+          // We need to add planar to our source options
+          ColorManager.SourceOptions := ColorManager.SourceOptions + [coSeparatePlanes];
           if FMode = PSD_CMYK then
           begin
             // Photoshop CMYK values are given with 0 for maximum values, but the
@@ -5932,6 +6038,8 @@ begin
         end;
       pf32Bit:
         begin
+          // We need to add planar to our source options
+          ColorManager.SourceOptions := ColorManager.SourceOptions + [coSeparatePlanes];
           if FMode = PSD_CMYK then
           begin
             // Photoshop CMYK values are given with 0 for maximum values, but the
@@ -5952,26 +6060,47 @@ begin
               RunA^ := 255 - RunA^;
               Inc(RunA);
             end;
-            RunR := GetChannel(0);
+            // Getting the pointers to the start of the channels back.
+            {RunR := GetChannel(0);
             RunG := GetChannel(1);
             RunB := GetChannel(2);
-            RunA := GetChannel(3);
+            RunA := GetChannel(3);}
+            RunCMYKA := GetChannel(-1);
+            if RunCMYKA = nil then
+              SetLength(RunChannels, 4)
+            else begin // CMYKA
+              SetLength(RunChannels, 5);
+              RunChannels[4] := RunCMYKA;  // A
+            end;
+            RunChannels[0] := GetChannel(0);  // C
+            RunChannels[1] := GetChannel(1);  // M
+            RunChannels[2] := GetChannel(2);  // Y
+            RunChannels[3] := GetChannel(3);  // K
+          end
+          else if FMode in [PSD_GRAYSCALE, PSD_INDEXED] then begin
+            // Gray or Indexed with alpha
+            SetLength(RunChannels, 2);
+            RunChannels[0] := GetChannel(0);  // G/I
+            RunChannels[1] := GetChannel(-1); // A
           end
           else
           begin
             // Either RGBA or Lab with alpha.
-            RunR := GetChannel(0);
-            RunG := GetChannel(1);
-            RunB := GetChannel(2);
-            RunA := GetChannel(-1);
+            SetLength(RunChannels, 4);
+            RunChannels[0] := GetChannel(0);  // R
+            RunChannels[1] := GetChannel(1);  // G
+            RunChannels[2] := GetChannel(2);  // B
+            RunChannels[3] := GetChannel(-1); // A
           end;
           for Y := 0 to Height - 1 do
           begin
-            ColorManager.ConvertRow([RunR, RunG, RunB, RunA], ScanLine[Y], Width, $FF);
-            Inc(RunR, Width);
+            ColorManager.ConvertRow(RunChannels, ScanLine[Y], Width, $FF);
+            for i := 0 to High(RunChannels) do
+              Inc(PByte(RunChannels[i]), Width);
+            {Inc(RunR, Width);
             Inc(RunG, Width);
             Inc(RunB, Width);
-            Inc(RunA, Width);
+            Inc(RunA, Width);}
           end;
         end;
     end;
@@ -6007,6 +6136,10 @@ end;
 function TPSDGraphic.DetermineColorScheme(ChannelCount: Integer): TColorScheme;
 
 begin
+  // To be able to read images with extra channels we will set any image with
+  // more than the expected number as channels as an image with alpha since
+  // at this moment we don't know exactly how to determine at this point if
+  // the image is with/without alpha channel.
   case FMode of
     PSD_DUOTONE, // duo tone should be handled as grayscale
     PSD_GRAYSCALE:
@@ -6016,7 +6149,7 @@ begin
         2:
           Result := csGA;
       else
-        Result := csUnknown;
+        Result := csGA;
       end;
     PSD_BITMAP:  // B&W
         Result := csG;
@@ -6027,7 +6160,7 @@ begin
         2:
           Result := csIndexedA;
       else
-        Result := csUnknown;
+        Result := csIndexedA;
       end;
     PSD_MULTICHANNEL,
     PSD_RGB:
@@ -6037,7 +6170,7 @@ begin
         4:
           Result := csRGBA;
       else
-        Result := csUnknown;
+        Result := csRGBA;
       end;
     PSD_CMYK:
       if ChannelCount = 4 then
@@ -6045,12 +6178,12 @@ begin
       else if ChannelCount = 5 then
         Result := csCMYKA
       else
-        Result := csUnknown;
+        Result := csCMYKA;
     PSD_LAB:
       if ChannelCount = 3 then
         Result := csCIELab
       else
-        Result := csUnknown;
+        Result := csCIELab;
   else
     Result := csUnknown;
   end;
@@ -6478,7 +6611,8 @@ var
   Run1,                // running pointer in Buffer 1
   Run2,                // etc.
   Run3,
-  Run4: PByte;
+  Run4,
+  Run5: PByte;
 
   W, H: Integer;       // Width and height of the layer or composite image.
 
@@ -6543,6 +6677,8 @@ begin
               AdvanceProgress(100 / H, 0, 1, True);
             end;
         end;
+      csGA,
+      csIndexedA,
       csRGB,
       csRGBA,
       csCMYK, csCMYKA,
@@ -6550,6 +6686,8 @@ begin
         begin
           // Data is organized in planes. This means first all red rows, then
           // all green and finally all blue rows.
+          // We need to add that to our source options
+          ColorManager.SourceOptions := ColorManager.SourceOptions + [coSeparatePlanes];
           BPS := FImageProperties.BitsPerSample div 8;
           ChannelSize := BPS * W * H;
 
@@ -6606,6 +6744,20 @@ begin
                     AdvanceProgress(100 / H, 0, 1, True);
                   end;
                 end;
+              csGA,
+              csIndexedA:
+                begin
+                  Run1 := Buffer;
+                  Run2 := Run1; Inc(Run2, ChannelSize);
+                  for Y := 0 to H - 1 do
+                  begin
+                    ColorManager.ConvertRow([Run1, Run2], ScanLine[Y], W, $FF);
+                    Inc(Run1, Increment);
+                    Inc(Run2, Increment);
+
+                    AdvanceProgress(100 / H, 0, 1, True);
+                  end;
+                end;
               csCMYK,
               csCMYKA:
                 begin
@@ -6623,15 +6775,31 @@ begin
                   Run2 := Run1; Inc(Run2, ChannelSize);
                   Run3 := Run2; Inc(Run3, ChannelSize);
                   Run4 := Run3; Inc(Run4, ChannelSize);
-                  for Y := 0 to H - 1 do
-                  begin
-                    ColorManager.ConvertRow([Run1, Run2, Run3, Run4], ScanLine[Y], W, $FF);
-                    Inc(Run1, Increment);
-                    Inc(Run2, Increment);
-                    Inc(Run3, Increment);
-                    Inc(Run4, Increment);
+                  if FImageProperties.ColorScheme = csCMYK then begin
+                    for Y := 0 to H - 1 do
+                    begin
+                      ColorManager.ConvertRow([Run1, Run2, Run3, Run4], ScanLine[Y], W, $FF);
+                      Inc(Run1, Increment);
+                      Inc(Run2, Increment);
+                      Inc(Run3, Increment);
+                      Inc(Run4, Increment);
 
-                    AdvanceProgress(100 / H, 0, 1, True);
+                      AdvanceProgress(100 / H, 0, 1, True);
+                    end;
+                  end
+                  else begin // CMYKA
+                    Run5 := Run4; Inc(Run5, ChannelSize);
+                    for Y := 0 to H - 1 do
+                    begin
+                      ColorManager.ConvertRow([Run1, Run2, Run3, Run4, Run5], ScanLine[Y], W, $FF);
+                      Inc(Run1, Increment);
+                      Inc(Run2, Increment);
+                      Inc(Run3, Increment);
+                      Inc(Run4, Increment);
+                      Inc(Run5, Increment);
+
+                      AdvanceProgress(100 / H, 0, 1, True);
+                    end;
                   end;
                 end;
               csCIELab:
@@ -6985,46 +7153,48 @@ begin
       TargetBitsPerSample := BitsPerSample;
 
     SourceSamplesPerPixel := Channels;
-    TargetSamplesPerPixel := Channels;
 
     CurrentColorScheme := DetermineColorScheme(Channels);
+    SourceColorScheme := CurrentColorScheme;
+    // Always explicitly set TargetSamplesPerPixel because source might have
+    // extra non color channels that we need to ignore if possible.
     case CurrentColorScheme of
       csG,
-      csGA,
       csIndexed:
         begin
-          SourceColorScheme := CurrentColorScheme;
           TargetColorScheme := CurrentColorScheme;
-          // For the time being only one channel can be handled.
-          // An eventual alpha channel is ignored.
-          SourceSamplesPerPixel := 1;
           TargetSamplesPerPixel := 1;
         end;
+      csGA,
+      csIndexedA:
+        begin
+          TargetColorScheme := csBGRA;
+          TargetSamplesPerPixel := 4;
+        end;
       csRGB:
-        if Channels = 4 then
+        if Channels = 3 then
+        begin
+          TargetColorScheme := csBGR;
+          TargetSamplesPerPixel := 3;
+        end
+        else // 4 or more
         begin
           SourceColorScheme := csRGBA;
           TargetColorScheme := csBGRA;
-        end
-        else
-        begin
-          SourceColorScheme := CurrentColorScheme;
-          TargetColorScheme := csBGR;
+          TargetSamplesPerPixel := 4;
         end;
       csRGBA:
         begin
-          SourceColorScheme := CurrentColorScheme;
           TargetColorScheme := csBGRA;
+          TargetSamplesPerPixel := 4;
         end;
       csCMYK:
         begin
-          SourceColorScheme := CurrentColorScheme;
           TargetColorScheme := csBGR;
           TargetSamplesPerPixel := 3;
         end;
       csCMYKA:
         begin
-          SourceColorScheme := CurrentColorScheme;
           TargetColorScheme := csBGRA;
           TargetSamplesPerPixel := 4;
         end;
@@ -7033,10 +7203,14 @@ begin
           SourceColorScheme := CurrentColorScheme;
           // PSD uses 0..255 for a and b so we need to convert them to -128..127
           SourceOptions := SourceOptions + [coLabByteRange, coLabChromaOffset];
-          if Channels = 4 then
-            TargetColorScheme := csBGRA
-          else
+          if Channels = 3 then begin
             TargetColorScheme := csBGR;
+            TargetSamplesPerPixel := 3;
+          end
+          else begin // 4 or more
+            TargetColorScheme := csBGRA;
+            TargetSamplesPerPixel := 4;
+          end;
         end;
     end;
     Result := TargetPixelFormat;
@@ -7091,12 +7265,15 @@ begin
       Count := ReadBigEndianCardinal(Run);
       // Setup the palette if necessary.
       case ColorScheme of
-        csG,
-        csGA:
+        csG: // For csGA we don't need to create a palette since we're converting it to BGRA
           Palette := ColorManager.CreateGrayscalePalette(ioMinIsWhite in Options);
         csIndexed:
           Palette := ColorManager.CreateColorPalette([Run, PAnsiChar(Run) + Count div 3,
             PAnsiChar(Run) + 2 * Count div 3], pfPlane8Triple, Count, False);
+        csIndexedA:
+          ColorManager.SetSourcePalette([Run, PAnsiChar(Run) + Count div 3,
+            PAnsiChar(Run) + 2 * Count div 3], pfPlane8Triple);
+
       end;
       Inc(Run, Count);
 
@@ -7105,7 +7282,7 @@ begin
 
       // Read resource section.
       Count := ReadBigEndianCardinal(Run);
-      if Count > 0 then        
+      if Count > 0 then
         ReadResources(Run);
       Inc(Run, Count);
 
@@ -7163,13 +7340,11 @@ begin
         // Initialize color manager.
         BitsPerSample := Header.Depth;
         FChannels := Header.Channels;
-        // 1..24 channels are supported in PSD files, we can only use 4.
+        // 1..24 channels are supported in PSD files.
         // The documentation states that main image data (rgb(a), cmyk etc.) is always
         // written with the first channels in their component order.
-        if FChannels > 4 then
-          SamplesPerPixel := 4
-        else
-          SamplesPerPixel := FChannels;
+        // We accept extra channels but will ignore them unless we know what to do with them.
+        SamplesPerPixel := FChannels;
 
         BitsPerPixel := SamplesPerPixel * BitsPerSample;
 
@@ -7915,8 +8090,10 @@ begin
                 end
                 else
                 begin // scBGR(A)
-                  // Since BPS should be always 8 here LayerRowSize is the same as LayerWidth
+                  // Since BPS should be always 8 here LayerRowSize is the same as LayerWidth.
                   LayerRowSize := LayerWidth;
+                  // PSP has separate channels thus we need to set that in source options.
+                  ColorManager.SourceOptions := ColorManager.SourceOptions + [coSeparatePlanes];
                   // Compute start offset in ScanLine for this layer
                   if ColorManager.TargetColorScheme = csBGR then
                     LayerStartOfs := AbsoluteRect.Left * 3  // 3 bytes per pixel
