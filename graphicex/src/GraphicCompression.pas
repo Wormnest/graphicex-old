@@ -12,7 +12,7 @@ unit GraphicCompression;
 //
 // The original code is GraphicCompression.pas, released November 1, 1999.
 //
-// The initial developer of the original code is Dipl. Ing. Mike Lischke (Pleiﬂa, Germany, www.delphi-gems.com),
+// The initial developer of the original code is Dipl. Ing. Mike Lischke (Plei√üa, Germany, www.delphi-gems.com),
 //
 // Portions created by Mike Lischke are
 // Copyright (C) 1999-2003 Dipl. Ing. Mike Lischke. All Rights Reserved.
@@ -162,6 +162,10 @@ type
   end;
   TStateArray = array of TStateEntry;
 
+  {$IFNDEF CPU64}
+  // For now disabled for 64 bits since it contains some assembler code that we
+  // need to figure out. This was also only used in the old TIFF reader before
+  // we started using libtiff which means it is currently not used at all by us.
   TCCITTDecoder = class(TDecoder)
   private
     FOptions: Integer; // determines some options how to proceed
@@ -206,6 +210,7 @@ type
     procedure Decode(var Source, Dest: Pointer; PackedSize, UnpackedSize: Integer); override;
     procedure Encode(Source, Dest: Pointer; Count: Cardinal; var BytesStored: Cardinal); override;
   end;
+  {$ENDIF}
 
   TLZ77Decoder = class(TDecoder)
   private
@@ -304,6 +309,7 @@ implementation
 
 uses
   Math,
+  gexTypes,
   GraphicEx,
   GraphicStrings,
   GraphicColor;
@@ -311,15 +317,16 @@ uses
 const // LZW encoding and decoding support
   NoLZWCode = 4096;
 
-type
-  EGraphicCompression = class(Exception);
 
-//----------------------------------------------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 
-procedure CompressionError(ErrorString: String); overload;
-
+procedure CompressionError(ErrorString: String);
 begin
-  raise EGraphicCompression.Create(ErrorString);
+  {$IFNDEF FPC}
+  raise EgexGraphicCompressionError.Create(ErrorString) at ReturnAddress;
+  {$ELSE}
+  raise EgexGraphicCompressionError.Create(ErrorString) at get_caller_addr(get_frame), get_caller_frame(get_frame);
+  {$ENDIF}
 end;
 
 //----------------- TDecoder (generic decoder class) -------------------------------------------------------------------
@@ -797,7 +804,7 @@ begin
         Target^ := StackPointer^;
         Inc(Target);
         Dec(UnpackedSize);
-      until Cardinal(StackPointer) <= Cardinal(@Stack);
+      until NativeUInt(StackPointer) <= NativeUInt(@Stack);
     end;
     Inc(SourcePtr);
     Dec(PackedSize);
@@ -1294,6 +1301,7 @@ end;
 
 //----------------- TCCITTDecoder --------------------------------------------------------------------------------------
 
+{$IFNDEF CPU64}
 constructor TCCITTDecoder.Create(Options: Integer; SwapBits, WordAligned: Boolean; Width: Cardinal);
 
 begin
@@ -1959,7 +1967,7 @@ begin
           Break;
     until (RunLength = G3_EOL) or (FPackedSize = 0);
     AdjustEOL;
-  until (FPackedSize = 0) or (Integer(FTarget) - Integer(Dest) >= UnpackedSize);
+  until (FPackedSize = 0) or (NativeInt(FTarget) - NativeInt(Dest) >= UnpackedSize);
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -1989,7 +1997,7 @@ var
     FRestWidth := FWidth;
     if FBitsLeft < 8 then
       FBitsLeft := 0; // discard remaining bits
-    if FWordAligned and Odd(Cardinal(FTarget)) then
+    if FWordAligned and Odd(NativeUInt(FTarget)) then
       Inc(FTarget);
   end;
 
@@ -2000,7 +2008,7 @@ begin
   FillChar(Dest^, UnpackedSize, 0);
 
   // swap all bits here, in order to avoid frequent tests in the main loop
-  if FSwapBits then 
+  if FSwapBits then
   asm
          PUSH EBX
          LEA EBX, ReverseTable
@@ -2052,6 +2060,7 @@ procedure TCCITTMHDecoder.Encode(Source, Dest: Pointer; Count: Cardinal; var Byt
 
 begin
 end;
+{$ENDIF}
 
 //----------------- TLZ77Decoder ---------------------------------------------------------------------------------------
 

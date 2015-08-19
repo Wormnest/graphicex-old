@@ -33,12 +33,28 @@ const
   CTester         = 'Tester';
   CException      = 'Exception';
   CMessage        = 'Message';
+  CVersion        = 'Version';
+  {$IFDEF LIBTIFF4}
+  CVersionDefault = '4';
+  {$ELSE}
+  CVersionDefault = '3';
+  {$ENDIF}
 
   TesterAll       = 'All';
   {$IFDEF FPC}
   CurrentTester   = 'Lazarus';
+  {$IFDEF CPU64}
+  CurrentTesterExact = 'Lazarus64';
+  {$ELSE}
+  CurrentTesterExact = 'Lazarus32';
+  {$ENDIF}
   {$ELSE}
   CurrentTester   = 'Delphi';
+  {$IFDEF CPU64}
+  CurrentTesterExact = 'Delphi64';
+  {$ELSE}
+  CurrentTesterExact = 'Delphi32';
+  {$ENDIF}
   {$ENDIF}
 
 type
@@ -220,9 +236,7 @@ procedure TExtendedTestSuite.AddTests(TestClass: TTestCaseClass);
 var
   ml: TStringList;
   i: integer;
-  tc: TTestCaseClass;
 begin
-  tc := TestClass;
   ml := TStringList.Create;
   try
     GetMethodList(TestClass, ml);
@@ -309,7 +323,6 @@ var
   SimpleXML: TJclSimpleXML;
   Node, FileNode, FileData: TJclSimpleXMLElem;
   Prop: TJclSimpleXMLProp;
-  NameOfTest: string;
   ImgFile, ImgPage, CompareFile: string;
   TempStr: string;
   TestData: TImageTestData;
@@ -344,10 +357,6 @@ begin
     if (SameText(Node.Name, FRootName)) and (Node.Items.Count = 1) and
       (Node.Items.Item[0].Name = FTestFiles) then begin
       Prop := Node.Properties.ItemNamed[FName];
-      if Assigned(Prop) then
-        NameOfTest := Prop.Value
-      else
-        NameOfTest := '<unnamed test>';
       Node := Node.Items.Item[0];
       for i := 0 to Node.Items.Count - 1 do begin
         ResetTestData;
@@ -367,20 +376,24 @@ begin
           end
           else if SameText(FileData.Name, CExpectedResult) then begin
             TempStr := GetPropValue(FileData, CTester);
-            if SameText(TempStr, CurrentTester) or SameText(TempStr, TesterAll) then begin
-              TempStr := GetPropValue(FileData, CUnrecognized);
-              if SameText(TempStr, '1') then
-                TestData.Unrecognized := True;
-              TempStr := GetPropValue(FileData, CEmpty);
-              if SameText(TempStr, '1') then
-                TestData.EmptyImage := True;
-              TempStr := GetPropValue(FileData, FReadable);
-              if SameText(TempStr, '1') then
-                TestData.Readable := True
-              else begin
-                TestData.Readable := False;
-                TestData.ExceptionType := GetPropValue(FileData, CException);
-                TestData.ExceptionMessage := GetPropValue(FileData, CMessage);
+            if SameText(TempStr, CurrentTesterExact) or SameText(TempStr, CurrentTester) or
+               SameText(TempStr, TesterAll) then begin
+              TempStr := GetPropValue(FileData, CVersion);
+              if (TempStr = '') or SameText(TempStr, CVersionDefault) then begin
+                TempStr := GetPropValue(FileData, CUnrecognized);
+                if SameText(TempStr, '1') then
+                  TestData.Unrecognized := True;
+                TempStr := GetPropValue(FileData, CEmpty);
+                if SameText(TempStr, '1') then
+                  TestData.EmptyImage := True;
+                TempStr := GetPropValue(FileData, FReadable);
+                if SameText(TempStr, '1') then
+                  TestData.Readable := True
+                else begin
+                  TestData.Readable := False;
+                  TestData.ExceptionType := GetPropValue(FileData, CException);
+                  TestData.ExceptionMessage := GetPropValue(FileData, CMessage);
+                end;
               end;
             end;
           end;
@@ -433,12 +446,40 @@ function TImageTestCase.GetTestName: string;
 {$ENDIF}
 begin
   Result := ExtractFileName(TestFileName);
+  if TestPage > 0 then
+    Result := Result + ', page ' + IntToStr(TestPage);
   if Unrecognized then
     Result := Result + ' (Image format that we can''t read or not an image)'
   else if EmptyImage then
     Result := Result + ' (Empty image or image with content we can''t read yet)'
   else if not Readable and (ExceptionType <> '') then
     Result := Result + ' (Expecting exception ' + ExceptionType + ')';
+end;
+
+// StripChars strips any char below space, except tab which is replaced by one space
+// Multiple spaces are replaced by just one space
+function StripChars(const AString: string): string;
+var i, DestPos: Integer;
+  LastChar: Char;
+begin
+  LastChar := #0;
+  DestPos := 0; // 0 because it gets incremented before use
+  SetLength(Result, Length(AString));
+  for i := 1 to Length(AString) do
+    if AString[i] <= ' ' then begin
+      if AString[i] in [#9, ' '] then // tab, space
+        if LastChar <> ' ' then begin
+          Inc(DestPos);
+          Result[DestPos] := ' ';
+          LastChar := ' ';
+        end;
+    end
+    else begin
+      Inc(DestPos);
+      Result[DestPos] := AString[i];
+      LastChar := AString[i];
+    end;
+  SetLength(Result, DestPos);
 end;
 
 {$IFDEF FPC}
@@ -466,7 +507,7 @@ begin
       begin
         if not (AExceptionClass = E.ClassName) then
           FailMsg:=MisMatch(E.ClassName)
-        else if not SameText(AExceptionMessage, E.Message) then
+        else if not SameText(StripChars(AExceptionMessage), StripChars(E.Message)) then
           FailMsg := ComparisonMsg(SExceptionMessageCompare, AExceptionMessage, E.Message)
         else if (AExceptionContext <> 0) and (AExceptionContext <> E.HelpContext) then
           FailMsg := ComparisonMsg(SExceptionHelpContextCompare, IntToStr(AExceptionContext),
@@ -480,6 +521,7 @@ procedure TImageTestCase.AssertException(const AMessage: string; AExceptionClass
   AMethod: TTestMethod; AExceptionMessage : String = '');
 var
   FailMsg : string;
+
 begin
   FCheckCalled := True;
   FailMsg := '';
@@ -491,7 +533,7 @@ begin
         if not (AExceptionClass = E.ClassName) then
           FailMsg := Format('Exception names not the same. We expected <%s> but we got <%s>.',
             [AExceptionClass, E.ClassName])
-        else if not SameText(AExceptionMessage, E.Message) then
+        else if not SameText(StripChars(AExceptionMessage), StripChars(E.Message)) then
           FailMsg := Format('Exception messages not the same. We expected <%s> but we got <%s>.',
             [AExceptionMessage, E.Message]);
     end;

@@ -88,7 +88,6 @@ uses
   {$endif ~JpegGraphic}
   {$IFDEF FPC}
   FPImage, // Progress stage defines
-  d2fGraphics, // CopyPalette
   {$ENDIF}
   GraphicCompression, GraphicStrings, GraphicColor;
 
@@ -866,13 +865,15 @@ function ReadImageProperties(const FileName: string; var Properties: TImagePrope
 
 var
   FileFormatList: TFileFormatList;
-  
+
 //----------------------------------------------------------------------------------------------------------------------
 
 implementation
 
 uses
-  gexVersion, gexUtils, {$IFNDEF FPC}Consts,{$ENDIF} Math, ZLibDelphi; //GXZLib
+  {$IFNDEF FPC}Consts,{$ENDIF}
+  Math, ZLibDelphi,
+  gexTypes, gexVersion, gexUtils;
 
 type
   {$ifndef COMPILER_6_UP}
@@ -901,23 +902,31 @@ end;
 {$ENDIF}
 {$endif}
 
-//----------------------------------------------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 
+// For "at ReturnAddress" syntax see: http://stackoverflow.com/questions/8950513/what-does-at-returnaddress-mean-in-delphi
+// Apparently Fpc doesn't have ReturnAddress, see: http://www.freepascal.org/docs-html/ref/refse101.html
 procedure GraphicExError(ErrorString: string); overload;
-
 begin
-  raise EInvalidGraphic.Create(ErrorString);
-end;                                                  
-
-//----------------------------------------------------------------------------------------------------------------------
-
-procedure GraphicExError(ErrorString: string; Args: array of const); overload;
-
-begin
-  raise EInvalidGraphic.CreateFmt(ErrorString, Args);
+  {$IFNDEF FPC}
+  raise EgexInvalidGraphic.Create(ErrorString) at ReturnAddress;
+  {$ELSE}
+  raise EgexInvalidGraphic.Create(ErrorString) at get_caller_addr(get_frame), get_caller_frame(get_frame);
+  {$ENDIF}
 end;
 
-//----------------------------------------------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
+
+procedure GraphicExError(ErrorString: string; Args: array of const); overload;
+begin
+  {$IFNDEF FPC}
+  raise EgexInvalidGraphic.CreateFmt(ErrorString, Args) at ReturnAddress;
+  {$ELSE}
+  raise EgexInvalidGraphic.CreateFmt(ErrorString, Args) at get_caller_addr(get_frame), get_caller_frame(get_frame);
+  {$ENDIF}
+end;
+
+//------------------------------------------------------------------------------
 
 procedure Upsample(Width, Height, ScaledWidth: Cardinal; Pixels: PAnsiChar);
 
@@ -1038,6 +1047,8 @@ begin
   begin
     SizeLow := GetFileSize(FFileHandle, @SizeHigh);
     FFileSize := Int64(SizeHigh) shl 32 + SizeLow;
+    if FFileSize = 0 then
+      Exit; // Empty file should not give an error here. We will handle it in our graphics type detection
     FFileMapping := CreateFileMapping(FFileHandle, nil, PAGE_READONLY	, 0, 0, nil);
     if FFileMapping = 0 then
       RaiseLastOSError;
@@ -1065,6 +1076,8 @@ begin
 
   SizeLow := GetFileSize(Stream.Handle, @SizeHigh);
   FFileSize := Int64(SizeHigh) shl 32 + SizeLow;
+    if FFileSize = 0 then
+      Exit; // Empty file should not give an error here. We will handle it in our graphics type detection
   FFileMapping := CreateFileMapping(Stream.Handle, nil, PAGE_READONLY, 0, 0, nil);
   if FFileMapping = 0 then
     RaiseLastOSError;
@@ -1780,7 +1793,7 @@ begin
     begin
       // There are not many unique fields which can be used for identification, so
       // we do some simple plausibility checks too.
-      Result := (Swap(Magic) = SGIMagic) and (BPC in [1, 2]) and (Swap(Dimension) in [1..3]);
+      Result := (SwapEndian(Magic) = SGIMagic) and (BPC in [1, 2]) and (SwapEndian(Dimension) in [1..3]);
     end;
 end;
 
@@ -1816,7 +1829,7 @@ begin
       // SGI images are always stored in big endian style
       ColorManager.SourceOptions := [coNeedByteSwap];
       with Header do
-        ColorMap := SwapLong(ColorMap);
+        ColorMap := SwapEndian(ColorMap);
 
       if Compression = ctRLE then
       begin
@@ -1825,9 +1838,9 @@ begin
         SetLength(FRowSize, Count);
         // Convert line starts and sizes.
         Move(Run^, Pointer(FRowStart)^, Count * SizeOf(Cardinal));
-        SwapLong(Pointer(FRowStart), Count);
+        SwapCardinalArrayEndian(PCardinal(FRowStart), Count);
         Move(Run^, Pointer(FRowSize)^, Count * SizeOf(Cardinal));
-        SwapLong(Pointer(FRowSize), Count);
+        SwapCardinalArrayEndian(PCardinal(FRowSize), Count);
         Decoder := TSGIRLEDecoder.Create(BitsPerSample);
       end
       else
@@ -2002,13 +2015,13 @@ begin
     with FImageProperties do
     begin
       Move(Memory^, Header, SizeOf(TSGIHeader));
-      if Swap(Header.Magic) = SGIMagic then
+      if SwapEndian(Header.Magic) = SGIMagic then
       begin
         Options := [ioBigEndian];
         BitsPerSample := Header.BPC * 8;
-        Width := Swap(Header.XSize);
-        Height := Swap(Header.YSize);
-        SamplesPerPixel := Swap(Header.ZSize);
+        Width := SwapEndian(Header.XSize);
+        Height := SwapEndian(Header.YSize);
+        SamplesPerPixel := SwapEndian(Header.ZSize);
         case SamplesPerPixel of
           4:
             ColorScheme := csRGBA;
@@ -2042,7 +2055,10 @@ type
   TTIFFHeader = packed record
     ByteOrder: Word;
     Version: Word;
-    FirstIFD: Cardinal;
+    case boolean of
+      False: (FirstIFD: Cardinal); // Classic TIFF
+      True: (OffsetSize, Unused: Word;
+             FirstIFD64: UInt64); // Big TIFF
   end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -2050,26 +2066,23 @@ type
 // For the libtiff library we need global functions to do the data retrieval. The setup is so that the currently
 // loading TIFF instance is given in the fd parameter.
 
-//function TIFFReadProc(fd: thandle_t; buf: tdata_t; size: tsize_t): tsize_t;
-function TIFFReadProc(Fd: Cardinal; Buffer: Pointer; Size: Integer): Integer; cdecl;
-
+function TIFFReadProc(Fd: thandle_t; Buffer: Pointer; Size: tmsize_t): tmsize_t; cdecl;
 var
   Graphic: TTIFFGraphic;
-  MaxLocation: Cardinal;
-  UsableSize: Cardinal;
-
+  MaxLocation: UInt64;
+  UsableSize: UInt64;
 begin
   Graphic := TTIFFGraphic(Fd);
   // Make sure we have a valid location (can happen with invalid or hacked tiff files)
-  MaxLocation := Cardinal(PAnsiChar(Graphic.FMemory) + Graphic.FSize);
-  if (Cardinal(Graphic.FCurrentPointer) + Cardinal(Size) > MaxLocation) then begin
-    if (Cardinal(Graphic.FCurrentPointer) > MaxLocation) then begin
+  MaxLocation := UInt64(PAnsiChar(Graphic.FMemory) + Graphic.FSize);
+  if (UInt64(Graphic.FCurrentPointer) + UInt64(Size) > MaxLocation) then begin
+    if (UInt64(Graphic.FCurrentPointer) > MaxLocation) then begin
       // Current position is beyond eof
       Result := 0;
       Exit;
     end
     else // We can still read a part of the requested data
-      UsableSize := MaxLocation - Cardinal(Graphic.FCurrentPointer);
+      UsableSize := MaxLocation - UInt64(Graphic.FCurrentPointer);
   end
   else
     UsableSize := Size;
@@ -2080,26 +2093,20 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-//function TIFFWriteProc(fd: thandle_t; buf: tdata_t; size: tsize_t): tsize_t;
-function TIFFWriteProc(Fd: Cardinal; Buffer: Pointer; Size: Integer): Integer; cdecl;
-
+function TIFFWriteProc(Fd: thandle_t; Buffer: Pointer; Size: tmsize_t): tmsize_t; cdecl;
 begin
   Result := 0; // Writing is not supported yet.
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-//function TIFFSeekProc(fd: thandle_t; off: toff_t; whence: Integer): toff_t;
-function TIFFSeekProc(Fd: Cardinal; Off: Cardinal; Whence: Integer): Cardinal; cdecl;
-
+function TIFFSeekProc(Fd: thandle_t; Off: toff_t; Whence: Integer): toff_t; cdecl;
 const
   SEEK_SET = 0; // seek to an absolute position
   SEEK_CUR = 1; // seek relative to current position
   SEEK_END = 2; // seek relative to end of file
-
 var
   Graphic: TTIFFGraphic;
-
 begin
   Graphic := TTIFFGraphic(Fd);
 
@@ -2117,20 +2124,17 @@ begin
   {$ELSE}
   if (Graphic.FCurrentPointer >= Graphic.FMemory+Graphic.FSize) or
   {$ENDIF}
-     (Cardinal(Graphic.FCurrentPointer) < Cardinal(Graphic.FMemory)) then
+     (UInt64(Graphic.FCurrentPointer) < UInt64(Graphic.FMemory)) then
     Result := 0
   else
-    Result := Cardinal(PAnsiChar(Graphic.FCurrentPointer) - PAnsiChar(Graphic.FMemory));
+    Result := UInt64(PAnsiChar(Graphic.FCurrentPointer) - PAnsiChar(Graphic.FMemory));
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-//function TIFFCloseProc(fd: thandle_t): Integer;
-function TIFFCloseProc(Fd: Cardinal): Integer; cdecl;
-
+function TIFFCloseProc(Fd: thandle_t): Integer; cdecl;
 var
   Graphic: TTIFFGraphic;
-
 begin
   Graphic := TTIFFGraphic(Fd);
   Graphic.FCurrentPointer := nil;
@@ -2139,12 +2143,9 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-//function TIFFSizeProc(fd: thandle_t): toff_t;
-function TIFFSizeProc(Fd: Cardinal): Cardinal; cdecl;
-
+function TIFFSizeProc(Fd: thandle_t): toff_t; cdecl;
 var
   Graphic: TTIFFGraphic;
-
 begin
   Graphic := TTIFFGraphic(Fd);
   Result := Graphic.FSize;
@@ -2152,18 +2153,14 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-//function TIFFMapProc(fd: thandle_t; var pbase: tdata_t; var psize: toff_t): Integer;
-function TIFFMapProc(Fd: Cardinal; PBase: PPointer; PSize: PCardinal): Integer; cdecl;
-
+function TIFFMapProc(Fd: thandle_t; PBase: PPointer; PSize: ptoff_t): Integer; cdecl;
 begin
   Result := 0;
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-//procedure TIFFUnmapProc(fd: thandle_t; base: tdata_t; size: toff_t);
-procedure TIFFUnmapProc(Fd: Cardinal; Base: Pointer; Size: Cardinal); cdecl;
-
+procedure TIFFUnmapProc(Fd: thandle_t; Base: Pointer; Size: toff_t); cdecl;
 begin
 end;
 
@@ -2173,9 +2170,12 @@ end;
 procedure TiffError(const Module, ErrorString: AnsiString);
 begin
   if Length(Module) > 0 then
-    GraphicExError( Module + ':  ' + ErrorString )
+    if (Length(ErrorString) > 0) and (ErrorString[1] <> ':') then
+      GraphicExError(Module + ': ' + ErrorString)
+    else
+      GraphicExError(Module + ErrorString)
   else
-    GraphicExError( ErrorString );
+    GraphicExError(ErrorString);
 end;
 
 procedure TTIFFGraphic.ReadContiguous(tif: PTIFF);
@@ -2438,11 +2438,29 @@ begin
       begin
         if ByteOrder = TIFF_BIGENDIAN then
         begin
-          Version := Swap(Header.Version);
+          Version := SwapEndian(Header.Version);
+          {$IFNDEF LIBTIFF4}
           FirstIFD := SwapLong(Header.FirstIFD);
+          {$ELSE}
+          if Version = TIFF_VERSION_CLASSIC then begin
+            FirstIFD := SwapEndian(Header.FirstIFD);
+          end
+          else if Version = TIFF_VERSION_BIG then begin
+            FirstIFD64 := SwapEndian(Header.FirstIFD64);
+          end
+          {$ENDIF}
         end;
 
+        {$IFNDEF LIBTIFF4}
         Result := (Version = TIFF_VERSION) and (Integer(FirstIFD) < Size);
+        {$ELSE}
+        case Version of
+          TIFF_VERSION_CLASSIC: Result := Int64(FirstIFD) < Size;
+          TIFF_VERSION_BIG: Result := Int64(FirstIFD64) < Size;
+        else
+          Result := False;
+        end;
+        {$ENDIF}
       end;
     end;
   end;
@@ -2460,14 +2478,14 @@ var
   I: Integer;
   Line: Pointer;
 
-  {$ifndef DELPHI_7_UP}
+  {$ifndef DELPHI_6_UP}
     // Structure used to build a va_list array.
     ExtraInfo: record
       Value1: Pointer;
       Value2: Pointer;
       Value3: Pointer;
     end;
-  {$endif DELPHI_7_UP}
+  {$endif DELPHI_6_UP}
   RedMap,
   GreenMap,
   BlueMap: PWord;
@@ -2487,6 +2505,16 @@ begin
       // Initialize sub section for image preparation. We give it a (guessed) value of 1%.
       StartProgressSection(1, gesPreparing);
 
+      // First some checks to see if we are able to handle the image
+      // Do this after InitProgress since in finally we will finalize the progress
+      // and if it hasn't been initialized first it will crash.
+      if Compression = ctUnknown then
+        GraphicExError(gesUnsupportedCompression, ['TIFF']);
+      if ColorScheme = csUnknown then
+        GraphicExError(gesColorScheme, ['TIFF']);
+      if (Width <= 0) or (Height <= 0) then
+        GraphicExError(gesInvalidDimensions, ['TIFF', Width, Height]);
+
       FMemory := Memory;
       FCurrentPointer := Memory;
       FSize := Size;
@@ -2494,7 +2522,7 @@ begin
       // OpenMode: r - readmode, (lowercase) m - Don't use memory mapped file
       // Since we are already using a memory mapped file ourselves it is not
       // necessary to let libtif also use a memory mapped file.
-      TIFFImage := TIFFClientOpen('', 'rm', Cardinal(Self), TIFFReadProc, TIFFWriteProc, TIFFSeekProc, TIFFCloseProc,
+      TIFFImage := TIFFClientOpen('', 'rm', NativeUInt(Self), TIFFReadProc, TIFFWriteProc, TIFFSeekProc, TIFFCloseProc,
         TIFFSizeProc, TIFFMapProc, TIFFUnmapProc);
       try
         // The preparation part is finished. Finish also progress section (which will step the main progress).
@@ -2532,7 +2560,7 @@ begin
               // for bottom-up images (which is usually the case).
               // jgb 2012-04-13 but take into account the case where there is only
               // 1 scanline (height=1)
-              if (Height = 1) or (Integer(Scanline[0]) - Integer(Scanline[1]) > 0) then
+              if (Height = 1) or (NativeInt(Scanline[0]) - NativeInt(Scanline[1]) > 0) then
               begin
                 StartProgressSection(0, gesLoadingData);
                 TIFFReadRGBAImageOriented(TIFFImage, Width, Height, Scanline[Height - 1],
@@ -2714,14 +2742,14 @@ begin
 
             if ColorScheme in [csIndexed, csIndexedA] then
             begin
-              {$ifndef DELPHI_7_UP}
+              {$ifndef DELPHI_6_UP}
                 ExtraInfo.Value1 := @RedMap;
                 ExtraInfo.Value2 := @GreenMap;
                 ExtraInfo.Value3 := @BlueMap;
                 GotPalette := TIFFVGetField(TIFFImage, TIFFTAG_COLORMAP, @ExtraInfo);
               {$else}
                 GotPalette := TIFFGetField(TIFFImage, TIFFTAG_COLORMAP, @RedMap, @GreenMap, @BlueMap);
-              {$endif DELPHI_7_UP}
+              {$endif DELPHI_6_UP}
 
               if GotPalette > 0 then
               begin
@@ -2801,20 +2829,20 @@ var
   TIFFImage: PTIFF;
   PhotometricInterpretation: Word;
   ExtraSamples: Word;
-  SampleInfo: PWord;
+  SampleInfo: PWordArray;
   TIFFValue: Word;
   TIFFCompression: Word;
   ResUnit: Word;
   FillOrder: Word;
   TiffStringValue: array [0..0] of PAnsiChar;
 
-  {$ifndef DELPHI_7_UP}
+  {$ifndef DELPHI_6_UP}
     // Structure used to build a va_list array.
     ExtraInfo: record
       Value1: Pointer;
       Value2: Pointer;
     end;
-  {$endif DELPHI_7_UP}
+  {$endif DELPHI_6_UP}
   
 begin
   Result := inherited ReadImageProperties(Memory, Size, ImageIndex);
@@ -2830,12 +2858,14 @@ begin
       // OpenMode: r - readmode, (lowercase) m - Don't use memory mapped file
       // Since we are already using a memory mapped file ourselves it is not
       // necessary to let libtif also use a memory mapped file.
-      TIFFImage := TIFFClientOpen('', 'rm', Cardinal(Self), TIFFReadProc, TIFFWriteProc, TIFFSeekProc, TIFFCloseProc,
+      TIFFImage := TIFFClientOpen('', 'rm', NativeUInt(Self), TIFFReadProc, TIFFWriteProc, TIFFSeekProc, TIFFCloseProc,
         TIFFSizeProc, TIFFMapProc, TIFFUnmapProc);
       if Assigned(TIFFImage) then
       try
-        // This version is actually a magic number, which does never change.
-        Version := TIFF_VERSION;
+        // This version is actually a magic number.
+        Version := pTIFFHEADER(FMemory).Version;
+        if pTIFFHEADER(FMemory).ByteOrder = TIFF_BIGENDIAN then
+          Version := SwapEndian(Version);
         try
           // Account for invalid files.
           ImageCount := TIFFNumberOfDirectories(TIFFImage);
@@ -2864,17 +2894,17 @@ begin
         // Photometric interpretation determines the color space.
         TIFFGetField(TIFFImage, TIFFTAG_PHOTOMETRIC, @PhotometricInterpretation);
         // Type of extra information for additional samples per pixel.
-        {$ifndef DELPHI_7_UP}
+        {$ifndef DELPHI_6_UP}
           ExtraInfo.Value1 := @ExtraSamples;
           ExtraInfo.Value2 := @SampleInfo;
           TIFFVGetFieldDefaulted(TIFFImage, TIFFTAG_EXTRASAMPLES, @ExtraInfo);
         {$else}
           TIFFGetFieldDefaulted(TIFFImage, TIFFTAG_EXTRASAMPLES, @ExtraSamples, @SampleInfo);
-        {$endif DELPHI_7_UP}
+        {$endif DELPHI_6_UP}
 
         // Determine whether extra samples must be considered.
         HasAlpha := (ExtraSamples >= 1) and
-          (SampleInfo^ in [EXTRASAMPLE_ASSOCALPHA, EXTRASAMPLE_UNASSALPHA]);
+          (SampleInfo^[0] in [EXTRASAMPLE_ASSOCALPHA, EXTRASAMPLE_UNASSALPHA]);
 
         // SampleFormat determines DataType of samples (default = unsigned int)
         TIFFGetFieldDefaulted(TIFFImage, TIFFTAG_SAMPLEFORMAT, @TIFFValue);
@@ -3598,7 +3628,7 @@ begin
       Height := Self.Height;
       PixelSize := 8 * BPP;
       // if the image is a bottom-up DIB then indicate this in the image descriptor
-      if Cardinal(Scanline[0]) > Cardinal(Scanline[1]) then
+      if NativeUInt(Scanline[0]) > NativeUInt(Scanline[1]) then
         ImageDescriptor := $20
       else
         ImageDescriptor := 0;
@@ -3945,6 +3975,7 @@ begin
               begin
                 Value := 0;
                 for J := 0 to 1 do
+                {$IFNDEF CPU64}
                 asm
                   MOV AL, [Value]
 
@@ -3966,6 +3997,22 @@ begin
 
                   MOV [Value], AL
                 end;
+                {$ELSE}
+                begin
+                  Value := Value shl 1; // No effect the first time since Value will be 0
+                  if Plane4^ and $80 <> 0 then Value := Value or $01;
+                  Value := Value shl 1;
+                  Plane4^ := Plane4^ shl 1;
+                  if Plane3^ and $80 <> 0 then Value := Value or $01;
+                  Value := Value shl 1;
+                  Plane3^ := Plane3^ shl 1;
+                  if Plane2^ and $80 <> 0 then Value := Value or $01;
+                  Value := Value shl 1;
+                  Plane2^ := Plane2^ shl 1;
+                  if Plane1^ and $80 <> 0 then Value := Value or $01;
+                  Plane1^ := Plane1^ shl 1;
+                end;
+                {$ENDIF}
                 Line^ := Value;
                 Inc(Line);
                 Dec(DataSize);
@@ -5135,7 +5182,7 @@ begin
       for I := 0 to LogPalette.palNumEntries - 1 do
       begin
         // load next 512 bytes buffer if necessary
-        if (Integer(Run) - Integer(@Buffer)) > 506 then
+        if (NativeInt(Run) - NativeInt(@Buffer)) > 506 then
         begin
           ReadBuffer(Buffer, SizeOf(Buffer));
           Run := @Buffer;
@@ -5753,7 +5800,7 @@ begin
       Inc(Run, SizeOf(TRLAHeader)); // Offsets are located right after the header
       Move(Run^, Offsets[0], Height * SizeOf(Cardinal));
       Inc(Run, Height * SizeOf(Cardinal));
-      SwapLong(Pointer(Offsets), Height);
+      SwapCardinalArrayEndian(PCardinal(Offsets), Height);
 
       // Setup intermediate storage.
       Decoder := TRLADecoder.Create;
@@ -5780,21 +5827,21 @@ begin
           // red
           Move(Run^, RLELength, SizeOf(RLELength));
           Inc(Run, SizeOf(RLELength));
-          RLELength := Swap(RLELength);
+          RLELength := SwapEndian(RLELength);
           RawBuffer := Run;
           Inc(Run, RLELength);
           Decoder.Decode(RawBuffer, RedBuffer, RLELength, Width);
           // green
           Move(Run^, RLELength, SizeOf(RLELength));
           Inc(Run, SizeOf(RLELength));
-          RLELength := Swap(RLELength);
+          RLELength := SwapEndian(RLELength);
           RawBuffer := Run;
           Inc(Run, RLELength);
           Decoder.Decode(RawBuffer, GreenBuffer, RLELength, Width);
           // blue
           Move(Run^, RLELength, SizeOf(RLELength));
           Inc(Run, SizeOf(RLELength));
-          RLELength := Swap(RLELength);
+          RLELength := SwapEndian(RLELength);
           RawBuffer := Run;
           Inc(Run, RLELength);
           Decoder.Decode(RawBuffer, BlueBuffer, RLELength, Width);
@@ -5808,7 +5855,7 @@ begin
             // alpha
             Move(Run^, RLELength, SizeOf(RLELength));
             Inc(Run, SizeOf(RLELength));
-            RLELength := Swap(RLELength);
+            RLELength := SwapEndian(RLELength);
             Decoder.Decode(Pointer(Run), AlphaBuffer, RLELength, Width);
 
             ColorManager.ConvertRow([RedBuffer, GreenBuffer, BlueBuffer, AlphaBuffer], Line, Width, $FF);
@@ -5931,22 +5978,22 @@ procedure TRLAGraphic.SwapHeader(var Header);
 begin
   with TRLAHeader(Header) do
   begin
-    SwapShort(@Window, 4);
-    SwapShort(@Active_window, 4);
-    Frame := Swap(Frame);
-    Storage_type := Swap(Storage_type);
-    Num_chan := Swap(Num_chan);
-    Num_matte := Swap(Num_matte);
-    Num_aux := Swap(Num_aux);
-    Revision := Swap(Revision);
-    Job_num  := SwapLong(Job_num);
-    Field := Swap(Field);
-    Chan_bits := Swap(Chan_bits);
-    Matte_type := Swap(Matte_type);
-    Matte_bits := Swap(Matte_bits);
-    Aux_type := Swap(Aux_type);
-    Aux_bits := Swap(Aux_bits);
-    Next := SwapLong(Next);
+    SwapWordArrayEndian(@Window, 4);
+    SwapWordArrayEndian(@Active_window, 4);
+    Frame := SwapEndian(Frame);
+    Storage_type := SwapEndian(Storage_type);
+    Num_chan := SwapEndian(Num_chan);
+    Num_matte := SwapEndian(Num_matte);
+    Num_aux := SwapEndian(Num_aux);
+    Revision := SwapEndian(Revision);
+    Job_num  := SwapEndian(Job_num);
+    Field := SwapEndian(Field);
+    Chan_bits := SwapEndian(Chan_bits);
+    Matte_type := SwapEndian(Matte_type);
+    Matte_bits := SwapEndian(Matte_bits);
+    Aux_type := SwapEndian(Aux_type);
+    Aux_bits := SwapEndian(Aux_bits);
+    Next := SwapEndian(Next);
   end;
 end;
 
@@ -6717,7 +6764,7 @@ begin
               SetLength(RLELength, AHeight);
               Count := 2 * AHeight;
               Move(Run^, Pointer(RLELength)^, Count); // RLE lengths are word values.
-              SwapShort(Pointer(RLELength), AHeight);
+              SwapWordArrayEndian(Pointer(RLELength), AHeight);
               Dec(RemainingSize, Count);
               // Advance the running pointer to after the RLE lenghts.
               Inc(Run, Count);
@@ -7016,7 +7063,7 @@ begin
         // Hence we have to make a copy of the RLE lengths.
         SetLength(RLELength, Count);
         Move(Source^, Pointer(RLELength)^, 2 * Count);
-        SwapShort(Pointer(RLELength), Count);
+        SwapWordArrayEndian(Pointer(RLELength), Count);
         // Advance the running pointer to after the RLE lenghts.
         Inc(Source, 2 * Count);
       end;
@@ -7266,7 +7313,7 @@ begin
   // Skip the layer section size. We are going to read the full section.
   Inc(Run, SizeOf(Cardinal));
 
-  LayerCount := Swap(PSmallInt(Run)^);
+  LayerCount := SwapEndian(PSmallInt(Run)^);
   // If LayerCount is < 0 then it means the first alpha channel contains the transparency data for the
   // composite image (the merged result). I'm not sure what to do with that info.
   LayerCount := Abs(LayerCount);
@@ -7304,7 +7351,7 @@ begin
       begin
         with Layer.Channels[I] do
         begin
-          ChannelID := Swap(PSmallInt(Run)^);
+          ChannelID := SwapEndian(PSmallInt(Run)^);
           Inc(Run, SizeOf(Word));
           Size := ReadBigEndianCardinal(Run);
         end;
@@ -7492,7 +7539,7 @@ begin
     Inc(Run);
     SetString(Name, PAnsiChar(Run), I);
     Inc(Run, I);
-    Inc(Run, Integer(Run) and 1); // Padded to even size.
+    Inc(Run, NativeInt(Run) and 1); // Padded to even size.
 
     // Resource size.
     Size := ReadBigEndianCardinal(Run);
@@ -7522,7 +7569,7 @@ begin
       // Simply skip any unknown entries.
       Inc(Run, Size);
     end;
-    Inc(Run, Integer(Run) and 1); // Padded to even size.
+    Inc(Run, NativeInt(Run) and 1); // Padded to even size.
   end;
 end;
 
@@ -7632,7 +7679,7 @@ begin
   Result := Size > SizeOf(TPSDHeader);
   if Result then
     with PPSDHeader(Memory)^ do
-      Result := (StrLIComp(Signature, '8BPS', 4) = 0) and (Swap(Version) = 1);
+      Result := (StrLIComp(Signature, '8BPS', 4) = 0) and (SwapEndian(Version) = 1);
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -7740,11 +7787,11 @@ begin
         with Header do
         begin
           // PSD files are big endian only.
-          Channels := Swap(Channels);
-          Rows := SwapLong(Rows);
-          Columns := SwapLong(Columns);
-          Depth := Swap(Depth);
-          Mode := Swap(Mode);
+          Channels := SwapEndian(Channels);
+          Rows := SwapEndian(Rows);
+          Columns := SwapEndian(Columns);
+          Depth := SwapEndian(Depth);
+          Mode := SwapEndian(Mode);
         end;
 
         Options := [ioBigEndian];
@@ -8791,7 +8838,7 @@ begin
   Inc(Source, SizeOf(FHeader));
 
   Result := CRC32(0, @FHeader.ChunkType, 4);
-  FHeader.Length := SwapLong(FHeader.Length);
+  FHeader.Length := SwapEndian(FHeader.Length);
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -8973,7 +9020,7 @@ begin
         // read IHDR chunk
         ReadDataAndCheckCRC(Run);
         Move(FRawBuffer^, Description, SizeOf(Description));
-        SwapLong(@Description, 2);
+        SwapCardinalArrayEndian(PCardinal(@Description), 2);
 
         // currently only one compression type is supported by PNG (LZ77)
         if Compression = ctLZ77 then
@@ -9001,8 +9048,11 @@ begin
               if (FHeader.Length mod 3) <> 0 then
                 GraphicExError(gesInvalidPalette, ['PNG']);
               ReadDataAndCheckCRC(Run);
-              // load palette only if the image is indexed colors
-              if Description.ColorType = 3 then
+              // load palette only if the image is indexed colors and we
+              // haven't loaded a palette yet. Duplicate palettes isn't
+              // allowed but broken images might still contain one.
+              // Not checking this might cause a memory leak.
+              if (Description.ColorType = 3) and not Assigned(PaletteBuf) then
               begin
                 // first setup pixel format before actually creating a palette
                 FSourceBPP := SetupColorDepth(Description.ColorType, Description.BitDepth);
@@ -9021,7 +9071,7 @@ begin
               begin
                 ReadDataAndCheckCRC(Run);
                 // The file gamma given here is a scaled cardinal (e.g. 0.45 is expressed as 45000).
-                ColorManager.SetGamma(SwapLong(PCardinal(FRawBuffer)^) / 100000);
+                ColorManager.SetGamma(SwapEndian(PCardinal(FRawBuffer)^) / 100000);
                 ColorManager.TargetOptions := ColorManager.TargetOptions + [coApplyGamma];
                 Include(Options, ioUseGamma);
                 Continue;
@@ -9049,7 +9099,7 @@ begin
           // Length = 0 should not happen but I have seen a broken png that has
           // no IEND chunk but does have length = 0
           // Also make sure a broken png doesn't set Run to illegal offset
-          if (FHeader.Length = 0) or (Cardinal(Run) >= Cardinal(PAnsiChar(Memory)+Size)) then
+          if (FHeader.Length = 0) or (NativeUInt(Run) >= NativeUInt(PAnsiChar(Memory)+Size)) then
             Break;
 
           // Note: According to the specs an unknown, but as critical marked chunk is a fatal error.
@@ -9102,79 +9152,87 @@ begin
         if IsChunk(IHDR) then
         begin
           Include(Options, ioBigEndian);
-          // read IHDR chunk
-          ReadDataAndCheckCRC(Run);
-          Move(FRawBuffer^, Description, SizeOf(Description));
-          SwapLong(@Description, 2);
+          // Since ReadDataAndCheckCRC is going to allocate FRawBuffer we
+          // need to add a try finally before it in case we get an exception
+          // which would otherwise cause a memory leak. Note that the crash
+          // could already occur inside ReadDataAndCheckCRC so we have to put
+          // the try before that (in case of a failed CRC check)
+          try
+            // read IHDR chunk
+            ReadDataAndCheckCRC(Run);
+            Move(FRawBuffer^, Description, SizeOf(Description));
+            SwapCardinalArrayEndian(PCardinal(@Description), 2);
 
-          if (Description.Width = 0) or (Description.Height = 0) then
-            Exit;
+            if (Description.Width = 0) or (Description.Height = 0) then
+              Exit;
 
-          Width := Description.Width;
-          Height := Description.Height;
+            Width := Description.Width;
+            Height := Description.Height;
 
-          if Description.Compression = 0 then
-            Compression := ctLZ77
-          else
-            Compression := ctUnknown;
-
-          BitsPerSample := Description.BitDepth;
-          SamplesPerPixel := 1;
-          case Description.ColorType of
-            0:
-              ColorScheme := csG;
-            2:
-              begin
-                ColorScheme := csRGB;
-                SamplesPerPixel := 3;
-              end;
-            3:
-              ColorScheme := csIndexed;
-            4:
-              ColorScheme := csGA;
-            6:
-              begin
-                ColorScheme := csRGBA;
-                SamplesPerPixel := 4;
-              end;
-          else
-            ColorScheme := csUnknown;
-          end;
-
-          BitsPerPixel := SamplesPerPixel * BitsPerSample;
-          FilterMode := Description.Filter;
-          Interlaced := Description.Interlaced <> 0;
-          HasAlpha := ColorScheme in [csGA, csRGBA, csBGRA];
-
-          // Find gamma and comment.
-          repeat
-            FCurrentCRC := LoadAndSwapHeader(Run);
-            if IsChunk(gAMA) then
-            begin
-              ReadDataAndCheckCRC(Run);
-              // The file gamma given here is a scaled cardinal (e.g. 0.45 is expressed as 45000).
-              FileGamma := SwapLong(PCardinal(FRawBuffer)^) / 100000;
-              Include(Options, ioUseGamma);
-              Continue;
-            end
+            if Description.Compression = 0 then
+              Compression := ctLZ77
             else
-              if IsChunk(tEXt) then
+              Compression := ctUnknown;
+
+            BitsPerSample := Description.BitDepth;
+            SamplesPerPixel := 1;
+            case Description.ColorType of
+              0:
+                ColorScheme := csG;
+              2:
+                begin
+                  ColorScheme := csRGB;
+                  SamplesPerPixel := 3;
+                end;
+              3:
+                ColorScheme := csIndexed;
+              4:
+                ColorScheme := csGA;
+              6:
+                begin
+                  ColorScheme := csRGBA;
+                  SamplesPerPixel := 4;
+                end;
+            else
+              ColorScheme := csUnknown;
+            end;
+
+            BitsPerPixel := SamplesPerPixel * BitsPerSample;
+            FilterMode := Description.Filter;
+            Interlaced := Description.Interlaced <> 0;
+            HasAlpha := ColorScheme in [csGA, csRGBA, csBGRA];
+
+            // Find gamma and comment.
+            repeat
+              FCurrentCRC := LoadAndSwapHeader(Run);
+              if IsChunk(gAMA) then
               begin
-                LoadText(Run);
+                ReadDataAndCheckCRC(Run);
+                // The file gamma given here is a scaled cardinal (e.g. 0.45 is expressed as 45000).
+                FileGamma := SwapEndian(PCardinal(FRawBuffer)^) / 100000;
+                Include(Options, ioUseGamma);
                 Continue;
-              end;
+              end
+              else
+                if IsChunk(tEXt) then
+                begin
+                  LoadText(Run);
+                  Continue;
+                end;
 
-            Inc(Run, FHeader.Length + 4);
-            if IsChunk(IEND) then
-              Break;
-            // Length = 0 should not happen but I have seen a broken png that has
-            // no IEND chunk but does have length = 0
-            // Also make sure a broken png doesn't set Run to illegal offset
-            if (FHeader.Length = 0) or (Cardinal(Run) >= Cardinal(PAnsiChar(Memory)+Size)) then
-              Break;
-          until False;
-
-          Freemem(FRawBuffer);
+              Inc(Run, FHeader.Length + 4);
+              if IsChunk(IEND) then
+                Break;
+              // Length = 0 should not happen but I have seen a broken png that has
+              // no IEND chunk but does have length = 0
+              // Also make sure a broken png doesn't set Run to illegal offset
+              if (FHeader.Length = 0) or (NativeUInt(Run) >= NativeUInt(PAnsiChar(Memory)+Size)) then
+                Break;
+            until False;
+          finally
+            if Assigned(FRawBuffer) then
+              Freemem(FRawBuffer);
+          end;
           Result := True;
         end;
       end
@@ -9202,11 +9260,11 @@ begin
         begin
           case BitDepth of
             2:
-              FBackgroundColor := MulDiv16(Swap(PWord(FRawBuffer)^), 15, 3);
+              FBackgroundColor := MulDiv16(SwapEndian(PWord(FRawBuffer)^), 15, 3);
             16:
-              FBackgroundColor := MulDiv16(Swap(PWord(FRawBuffer)^), 255, 65535);
+              FBackgroundColor := MulDiv16(SwapEndian(PWord(FRawBuffer)^), 255, 65535);
           else // 1, 4, 8 bits gray scale
-            FBackgroundColor := Byte(Swap(PWord(FRawBuffer)^));
+            FBackgroundColor := Byte(SwapEndian(PWord(FRawBuffer)^));
           end;
         end;
       2, 6:  // RGB(A)
@@ -9214,15 +9272,15 @@ begin
           Run := FRawBuffer;
           if BitDepth = 16 then
           begin
-            R := MulDiv16(Swap(Run^), 255, 65535); Inc(Run);
-            G := MulDiv16(Swap(Run^), 255, 65535); Inc(Run);
-            B := MulDiv16(Swap(Run^), 255, 65535);
+            R := MulDiv16(SwapEndian(Run^), 255, 65535); Inc(Run);
+            G := MulDiv16(SwapEndian(Run^), 255, 65535); Inc(Run);
+            B := MulDiv16(SwapEndian(Run^), 255, 65535);
           end
           else
           begin
-            R := Byte(Swap(Run^)); Inc(Run);
-            G := Byte(Swap(Run^)); Inc(Run);
-            B := Byte(Swap(Run^));
+            R := Byte(SwapEndian(Run^)); Inc(Run);
+            G := Byte(SwapEndian(Run^)); Inc(Run);
+            B := Byte(SwapEndian(Run^));
           end;
           FBackgroundColor := RGB(R, G, B);
         end;
@@ -9440,11 +9498,11 @@ begin
         begin
           case BitDepth of
             2:
-              R := MulDiv16(Swap(PWord(FRawBuffer)^), 15, 3);
+              R := MulDiv16(SwapEndian(PWord(FRawBuffer)^), 15, 3);
             16:
-              R := MulDiv16(Swap(PWord(FRawBuffer)^), 255, 65535);
+              R := MulDiv16(SwapEndian(PWord(FRawBuffer)^), 255, 65535);
           else // 1, 4, 8 bits gray scale
-            R := Byte(Swap(PWord(FRawBuffer)^));
+            R := Byte(SwapEndian(PWord(FRawBuffer)^));
           end;
           FTransparentColor := RGB(R, R, R);
         end;
@@ -9453,15 +9511,15 @@ begin
           Run := FRawBuffer;
           if BitDepth = 16 then
           begin
-            R := MulDiv16(Swap(Run^), 255, 65535); Inc(Run);
-            G := MulDiv16(Swap(Run^), 255, 65535); Inc(Run);
-            B := MulDiv16(Swap(Run^), 255, 65535);
+            R := MulDiv16(SwapEndian(Run^), 255, 65535); Inc(Run);
+            G := MulDiv16(SwapEndian(Run^), 255, 65535); Inc(Run);
+            B := MulDiv16(SwapEndian(Run^), 255, 65535);
           end
           else
           begin
-            R := Byte(Swap(Run^)); Inc(Run);
-            G := Byte(Swap(Run^)); Inc(Run);
-            B := Byte(Swap(Run^));
+            R := Byte(SwapEndian(Run^)); Inc(Run);
+            G := Byte(SwapEndian(Run^)); Inc(Run);
+            B := Byte(SwapEndian(Run^));
           end;
           FTransparentColor := RGB(R, G, B);
         end;
@@ -9523,7 +9581,7 @@ begin
 
   Move(Source^, FileCRC, SizeOf(FileCRC));
   Inc(Source, SizeOf(FileCRC));
-  FileCRC := SwapLong(FileCRC);
+  FileCRC := SwapEndian(FileCRC);
   // The type field of a chunk is included in the CRC, this serves as initial value
   // for the calculation here and is determined in LoadAndSwapHeader.
   FCurrentCRC := CRC32(FCurrentCRC, FRawBuffer, FHeader.Length);
@@ -9566,7 +9624,7 @@ begin
     end;
 
     // this decode call will advance Source and Target accordingly
-    Decoder.Decode(FCurrentSource, LocalBuffer, FIDATSize - (Integer(FCurrentSource) - Integer(FRawBuffer)),
+    Decoder.Decode(FCurrentSource, LocalBuffer, FIDATSize - (NativeInt(FCurrentSource) - NativeInt(FRawBuffer)),
       PendingOutput);
 
     if TLZ77Decoder(Decoder).ZLibResult = Z_STREAM_END then
@@ -9579,7 +9637,7 @@ begin
     if TLZ77Decoder(Decoder).ZLibResult <> Z_OK then
       GraphicExError(gesCompression, ['PNG']);
 
-    PendingOutput := BytesPerRow - (Integer(LocalBuffer) - Integer(RowBuffer));
+    PendingOutput := BytesPerRow - (NativeInt(LocalBuffer) - NativeInt(RowBuffer));
   until PendingOutput = 0;
 end;
 

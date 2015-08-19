@@ -46,9 +46,6 @@ procedure Stretch(NewWidth, NewHeight: Cardinal; Filter: TResamplingFilter;
 procedure Stretch(NewWidth, NewHeight: Cardinal; Filter: TResamplingFilter;
     Radius: Single; Source: TBitmap); overload;
 
-type
-  EGraphicExStretchException = class(EBaseGraphicExException);
-
 
 implementation
 
@@ -607,12 +604,12 @@ begin
     // For Source or Dest with Height 1 we can't use Scanline[1] to compute Delta.
     // Since Delta in these cases won't be used anyway we set it to 0.
     if SourceHeight > 1 then
-      Delta := Integer(Work.ScanLine[1]) - Integer(SourceLine)
+      Delta := NativeInt(Work.ScanLine[1]) - NativeInt(SourceLine)
     else
       Delta := 0;
     DestLine := Target.ScanLine[0];
     if TargetHeight > 1 then
-      DestDelta := Integer(Target.ScanLine[1]) - Integer(DestLine)
+      DestDelta := NativeInt(Target.ScanLine[1]) - NativeInt(DestLine)
     else
       DestDelta := 0;
     for K := 0 to TargetWidth - 1 do
@@ -658,7 +655,7 @@ procedure Stretch(NewWidth, NewHeight: Cardinal; Filter: TResamplingFilter; Radi
 
 begin
   if Source.PixelFormat in [pfDevice, pf8Bit, pf16Bit] then
-    raise EGraphicExStretchException.Create(ResStretchInvalidPixelFormat);
+    raise EgexStretchException.Create(ResStretchInvalidPixelFormat);
 
   if Radius = 0 then
     Radius := DefaultFilterRadius[Filter];
@@ -678,7 +675,7 @@ var
 
 begin
   if Source.PixelFormat in [pfDevice, pf8Bit, pf16Bit] then
-    raise EGraphicExStretchException.Create(ResStretchInvalidPixelFormat);
+    raise EgexStretchException.Create(ResStretchInvalidPixelFormat);
 
   if Radius = 0 then
     Radius := DefaultFilterRadius[Filter];

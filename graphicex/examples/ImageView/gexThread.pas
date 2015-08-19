@@ -1,6 +1,6 @@
 { gexThread A Threaded thumbnail creator based on R.M. Klever's Threaded ThumbNail Demo.
   License: MPL 1.1.
-  Portions Created by Jacob Boerema are Copyright (C) 2013 Jacob Boerema.
+  Portions Created by Jacob Boerema are Copyright (C) 2013-2015 Jacob Boerema.
   All Rights Reserved.
   This fork of GraphicEx can be found at https://bitbucket.org/jacobb/jgb-thirdparty
 }
@@ -55,9 +55,9 @@ type
     Name: string;
     ThumbWidth: Word;
     ThumbHeight: Word;
-    Size: Integer;
+    Size: Int64;
     Modified: TDateTime;
-    IWidth, IHeight: Word;
+    IWidth, IHeight: Integer;
     GotThumb: Boolean;
     Image: TObject;
     ImageFormat: TImageFileFormat;  // The image file format
@@ -363,12 +363,12 @@ procedure MakeThumbNail(Src, Dst: TBitmap);
 var
   x, y, ix, iy, w, h, dx, dy: Integer;
   x1, x2, x3: integer;
-  RowDest, RowSource, RowSourceStart: Integer;
-  iRatio: Integer;
+  RowDest, RowSource, RowSourceStart: NativeInt;
+  iRatio: Cardinal;
   Ratio: Single;
-  iRed, iGrn, iBlu: Integer;
+  iRed, iGrn, iBlu: Cardinal;
   pt: PRGB24;
-  iSrc, iDst: Integer;
+  iSrc, iDst: NativeInt;
   lutW, lutH: array of Integer;
 begin
   if (Src.Width <= Dst.Width) and (Src.Height <= Dst.Height) then
@@ -398,8 +398,8 @@ begin
     x1 := x2;
     x2 := Trunc((x + 2) * Ratio);
   end;
-  RowDest := Integer(Dst.Scanline[0]);
-  RowSourceStart := integer(Src.Scanline[0]);
+  RowDest := NativeInt(Dst.Scanline[0]);
+  RowSourceStart := NativeInt(Src.Scanline[0]);
   RowSource := RowSourceStart;
   iDst := ((w * 24 + 31) and not 31) shr 3;
   iSrc := ((Src.Width * 24 + 31) and not 31) shr 3;
@@ -434,9 +434,9 @@ begin
       end;
       iRatio := $00FFFFFF div (dx * dy);
       pt := PRGB24(RowDest + x3);
-      pt.R := (iRed * iRatio) shr 24;
-      pt.G := (iGrn * iRatio) shr 24;
-      pt.B := (iBlu * iRatio) shr 24;
+      pt.R := Byte((iRed * iRatio) shr 24);
+      pt.G := Byte((iGrn * iRatio) shr 24);
+      pt.B := Byte((iBlu * iRatio) shr 24);
       x1 := x1 + 3 * dx;
       inc(x3, 3);
     end;
@@ -466,8 +466,8 @@ var
   Vertexs: array [ 0 .. 1 ] of TRIVERTEX; // was TTriVertex;
   GRect: TGradientRect;
 begin
-  Vertexs[ 0 ].x := ARect.Left;
-  Vertexs[ 0 ].y := ARect.Top;
+  Vertexs[ 0 ].x := DWORD(ARect.Left);
+  Vertexs[ 0 ].y := DWORD(ARect.Top);
   Vertexs[ 0 ].Red := ( AColor1 and $000000FF ) shl 8;
   Vertexs[ 0 ].Green := ( AColor1 and $0000FF00 );
   Vertexs[ 0 ].Blue := ( AColor1 and $00FF0000 ) shr 8;
@@ -665,22 +665,26 @@ begin
     bmp.Canvas.Draw(0, 0, Img);
     try
       ThumbBmp := TBitmap.Create;
-      ThumbBmp.Canvas.Lock;
-      ThumbSize := CalcThumbSize(bmp.Width, bmp.Height, FMaxThumbSizeW,
-        FMaxThumbSizeH);
-      newW := ThumbSize.X;
-      newH := ThumbSize.Y;
-      if newW <= 0 then
-        newW := 1;
-      if newH <= 0 then
-        newH := 1;
-      ThumbBmp.PixelFormat := pf24Bit;
-      ThumbBmp.Width := newW;
-      ThumbBmp.Height := newH;
-      MakeThumbNail(bmp, ThumbBmp);
+      try
+        ThumbBmp.Canvas.Lock;
+        ThumbSize := CalcThumbSize(bmp.Width, bmp.Height, FMaxThumbSizeW,
+          FMaxThumbSizeH);
+        newW := ThumbSize.X;
+        newH := ThumbSize.Y;
+        if newW <= 0 then
+          newW := 1;
+        if newH <= 0 then
+          newH := 1;
+        ThumbBmp.PixelFormat := pf24Bit;
+        ThumbBmp.Width := newW;
+        ThumbBmp.Height := newH;
+        MakeThumbNail(bmp, ThumbBmp);
+      finally
+        ThumbBmp.Canvas.UnLock;
+      end;
       Result := ThumbBmp;
     except
-      ThumbBmp.Canvas.UnLock;
+      // Only free ThumbBmp in case we get an exception!
       FreeAndNil(ThumbBmp);
       raise;
     end;
@@ -838,7 +842,10 @@ begin
       try
         ThumbBmp := ConvertImageToThumb(FName, Thumb);
       except
-        FExceptionMessage := 'Error loading image: ' + FName;
+        on e:Exception do
+          FExceptionMessage := 'Error loading image: ' + FName + #13#10 + e.Message;
+        else // unknown exception class
+          FExceptionMessage := 'Error loading image: ' + FName;
         fail := True;
       end;
     end;
@@ -984,6 +991,11 @@ begin
   end;
 end;
 
+{$IFDEF FPC}
+  {$PUSH} // Save flags
+  {$RANGECHECKS OFF} // No range checking
+  {$OVERFLOW OFF}    // No overflow checking
+{$ENDIF}
 procedure TgexBaseForm.BiResample(Src, Dest: TBitmap; Sharpen: Boolean);
 // Fast bilinear resampling procedure found at Swiss Delphi Center + my mods...
 type
@@ -997,25 +1009,26 @@ var
   i, x1, x2, z, z2, iz2: Integer;
   w1, w2, w3, w4: Integer;
   Ratio: Integer;
-  sDst, sDstOff: Integer;
+  sDst, sDstOff: NativeInt;
   sScanLine: array[0..255] of PRGBArray;
   Src1, Src2: PRGBArray;
   C, C1, C2: TRGB24;
-  y1, y2, y3, x3, iRed, iGrn, iBlu: Integer;
+  y1, y2, y3: NativeInt;
+  x3, iRed, iGrn, iBlu: Integer;
   p1, p2, p3, p4, p5: PRGB24;
 begin
   // ScanLine buffer for Source
-  sDst := Integer(src.Scanline[0]);
-  sDstOff := Integer(src.Scanline[1]) - sDst;
+  sDst := NativeInt(src.Scanline[0]);
+  sDstOff := NativeInt(src.Scanline[1]) - sDst;
   for i := 0 to src.Height - 1 do
   begin
     sScanLine[i] := PRGBArray(sDst);
     sDst := sDst + sDstOff;
   end;
   // ScanLine for Destiantion
-  sDst := Integer(Dest.Scanline[0]);
+  sDst := NativeInt(Dest.Scanline[0]);
   y1 := sDst; // only for sharpening...
-  sDstOff := Integer(Dest.Scanline[1]) - sDst;
+  sDstOff := NativeInt(Dest.Scanline[1]) - sDst;
   // Ratio is same for width and height
   Ratio := ((src.Width - 1) shl 15) div Dest.Width;
   py := 0;
@@ -1043,9 +1056,10 @@ begin
       w1 := iz2 - w2;
       w4 := (z * z2) shr 15;
       w3 := z2 - w4;
-      C.R := (C1.R * w1 + Src1[x2].R * w2 + C2.R * w3 + Src2[x2].R * w4) shr 15;
-      C.G := (C1.G * w1 + Src1[x2].G * w2 + C2.G * w3 + Src2[x2].G * w4) shr 15;
-      C.B := (C1.B * w1 + Src2[x2].B * w2 + C2.B * w3 + Src2[x2].B * w4) shr 15;
+      C.R := Byte((C1.R * w1 + Src1[x2].R * w2 + C2.R * w3 + Src2[x2].R * w4) shr 15);
+      C.G := Byte((C1.G * w1 + Src1[x2].G * w2 + C2.G * w3 + Src2[x2].G * w4) shr 15);
+      C.B := Byte((C1.B * w1 + Src2[x2].B * w2 + C2.B * w3 + Src2[x2].B * w4) shr 15);
+
       // Set destination pixel
       PRGBArray(sDst)[x] := C;
       inc(px, Ratio);
@@ -1097,6 +1111,9 @@ begin
     inc(y3, sDstOff);
   end;
 end;
+{$IFDEF FPC}
+  {$POP} // Restore flags
+{$ENDIF}
 
 {$IFDEF FPC}
 function Rect( ATop, ALeft, ABottom, ARight: Integer): TRect; inline;

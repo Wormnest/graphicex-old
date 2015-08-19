@@ -48,7 +48,7 @@ uses
   {$ENDIF}
   gexBmpWrapper,
   gexJpegWrapper,
-  GraphicEx, rkView, gexThread, Buttons, Grids;
+  gexTypes, GraphicEx, rkView, gexThread, Buttons, Grids;
 
 const
   // Additional image format consts...
@@ -79,6 +79,9 @@ const
     );
 
 type
+
+  { TfrmViewer }
+
   TfrmViewer = class(TgexBaseForm)
     ShellTV1: TShellTreeView;
     pnlMiddle: TPanel;
@@ -112,6 +115,7 @@ type
     Splitter3: TSplitter;
     pnlFolderView: TPanel;
     pnlImageProperties: TPanel;
+    cbBackground: TComboBox;
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure FormShow(Sender: TObject);
@@ -148,6 +152,9 @@ type
       Shift: TShiftState; MousePos: TPoint; var Handled: Boolean);
     procedure sgImgPropertiesMouseWheelUp(Sender: TObject;
       Shift: TShiftState; MousePos: TPoint; var Handled: Boolean);
+    procedure cbBackgroundChange(Sender: TObject);
+    procedure cbStretchChange(Sender: TObject);
+    procedure cbStretchFilterChange(Sender: TObject);
   private
     { Private declarations }
     FThumbFrame,
@@ -157,11 +164,13 @@ type
     FThumbWidth,
     FThumbHeight: Integer;
     FThumbnailBackground: TBitmap;
+    FCheckerboardColor1,
+    FCheckerboardColor2: TColor;
     FPicture: TPicture;
 
     FLoadTick,
     FStretchTick,
-    FBlendTick: Cardinal;
+    FBlendTick: UInt64;
 
     CanView: Boolean;
 
@@ -220,13 +229,14 @@ type
     procedure UpdateLoadingStatus;
     procedure UpdatePageButtons;
     procedure LoadImage(Thumb: PgexThumbData);
-    procedure ImageGotoPage(PageNo: Integer);
+    procedure ImageGotoPage(PageNo: Integer; ForceReload: Boolean = False);
     procedure HandleStretch;
     procedure UpdatePaintBoxSize;
     procedure ShowErrors;
 
     // Creates the checkered default background for an entry.
     procedure CreateDefaultBackground;
+    procedure UpdateDefaultBackground;
     procedure FillBackground(R: TRect; Target: TCanvas);
     procedure WMEraseBkgnd(var Msg: TWMEraseBkgnd); message WM_ERASEBKGND;
 
@@ -267,6 +277,12 @@ const
   C_ImgFolderHeight = 'ImageFolderViewHeight';
   C_MiddleViewWidth = 'MiddleViewWidth';
   C_Maximized       = 'Maximized';  // 1 = maximized, 0 = not maximized
+
+const
+  Light_bgColor1 = clBtnFace;
+  Light_bgColor2 = clBtnHighlight;
+  Dark_bgColor1 = TColor($606060); // a medium dark gray
+  Dark_bgColor2 = TColor($909090); // a little lighter gray
 
 var TiffError: array[0..1000] of Char;
   CollectErrors: Boolean;
@@ -380,6 +396,9 @@ begin
   // Add disabled state bitmaps to our page SpeedButtons
   AddDisabledBmp([spbtnFirst, spbtnPrev, spbtnNext, spbtnLast]);
 
+  // Default checkerboard background colors are darkish
+  FCheckerboardColor1 := Dark_bgColor1;
+  FCheckerboardColor2 := Dark_bgColor2;
   // Make the checkered background
   CreateDefaultBackground;
   // Initialize picture
@@ -599,7 +618,19 @@ begin
         Buffer.Canvas.Lock;
         try
           FillBackground(ClientRect, Buffer.Canvas);
+          // Note: I can't get bmPerPixelAlpha to work in 64 bits mode for Fpc thus
+          // we use bmConstantAlpha. Since (currently) the background canvas is opaque
+          // it doesn't matter anyway. We would only need it if we wanted to blend
+          // two semi transparent images.
+          // Note that even if 32 bits mode I have my doubts whether the Fpc
+          // version works correct.
+          // New note: It seems that Delphi only works (blends) when using bmPerPixelAlpha
+          // so we will use that for Delphi and bmConstantAlpha for Lazarus.
+          {$IFNDEF FPC}
           gexBlend.AlphaBlend(FPicture.Bitmap.Canvas.Handle, Buffer.Canvas.Handle, R, Point(X, Y), bmPerPixelAlpha, 0, 0);
+          {$ELSE}
+          gexBlend.AlphaBlend(FPicture.Bitmap.Canvas.Handle, Buffer.Canvas.Handle, R, Point(X, Y), bmConstantAlpha, 255, 0);
+          {$ENDIF}
         finally
           Buffer.Canvas.Unlock;
         end;
@@ -1179,11 +1210,11 @@ begin
   ImgComment := AGraphic.ImageProperties.Comment;
 end;
 
-procedure TfrmViewer.ImageGotoPage(PageNo: Integer);
+procedure TfrmViewer.ImageGotoPage(PageNo: Integer; ForceReload: Boolean = False);
 var
   AGraphic: TGraphic;
 begin
-  if (PageNo <> ImgPage) and (PageNo >= 0) and (PageNo < ImgPageCount) then begin
+  if ((PageNo <> ImgPage) or ForceReload) and (PageNo >= 0) and (PageNo < ImgPageCount) then begin
     FBlendTick := 0;
     FLoadTick := GetAccurateTick; // Starting time for loading
     ImgPage := PageNo;
@@ -1586,13 +1617,15 @@ begin
       // for exceptions that we recognize.
       // When using GraphicEx for other purposes than an Image Viewer you should
       // usually be more conservative with eating all exceptions.
-      on e:EInvalidGraphic do begin
+      on e:EgexInvalidGraphic do begin
         LoadingFailed := True;
-        lblStatus.Caption := 'Error loading image: ' + FileName;
+        lblStatus.Caption := 'Error loading image: ' + FileName +#13#10 +
+          e.Message;
       end;
-      on e:EColorConversionError do begin
+      on e:EgexColorConversionError do begin
         LoadingFailed := True;
-        lblStatus.Caption := 'Color conversion error loading image: ' + FileName;
+        lblStatus.Caption := 'Color conversion error loading image: ' + FileName +
+          #13#10 + e.Message;
       end;
       on e:EOutOfMemory do begin
         LoadingFailed := True;
@@ -1705,9 +1738,17 @@ begin
   begin
     Width := 16;
     Height := 16;
-    Canvas.Brush.Color := clBtnFace;
+    UpdateDefaultBackground;
+  end;
+end;
+
+procedure TfrmViewer.UpdateDefaultBackground;
+begin
+  with FThumbnailBackground do
+  begin
+    Canvas.Brush.Color := FCheckerboardColor1;
     Canvas.FillRect(Rect(0, 0, Width, Height));
-    Canvas.Brush.Color := clBtnHighlight;
+    Canvas.Brush.Color := FCheckerboardColor2;
     Canvas.FillRect(Rect(0, 0, 8, 8));
     Canvas.FillRect(Rect(8, 8, 16, 16));
   end;
@@ -1938,6 +1979,45 @@ procedure TfrmViewer.sgImgPropertiesMouseWheelUp(Sender: TObject;
   Shift: TShiftState; MousePos: TPoint; var Handled: Boolean);
 begin
   Handled := True;
+end;
+
+procedure TfrmViewer.cbBackgroundChange(Sender: TObject);
+begin
+  if cbBackground.ItemIndex = 1 then begin
+    FCheckerboardColor1 := Light_bgColor1;
+    FCheckerboardColor2 := Light_bgColor2;
+  end
+  else begin
+    FCheckerboardColor1 := Dark_bgColor1;
+    FCheckerboardColor2 := Dark_bgColor2;
+  end;
+  UpdateDefaultBackground;
+  HandleStretch;
+  pb2.Invalidate;
+  UpdateLoadingStatus;
+end;
+
+procedure TfrmViewer.cbStretchChange(Sender: TObject);
+begin
+  if cbStretch.Checked then begin
+    HandleStretch;
+    pb2.Invalidate;
+    UpdateLoadingStatus;
+  end
+  else begin
+    // Since stretching is done on the actual image we will have to reload
+    // the image if we uncheck the stretch checkbox
+    ImageGotoPage(ImgPage, True);
+  end;
+end;
+
+procedure TfrmViewer.cbStretchFilterChange(Sender: TObject);
+begin
+  if not cbStretch.Checked then
+    Exit;
+  // Since stretching is done on the actual image we will have to reload
+  // the image if we uncheck the stretch checkbox
+  ImageGotoPage(ImgPage, True);
 end;
 
 initialization

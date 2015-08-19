@@ -1,6 +1,6 @@
 unit rkView;
 
-//  rkView © 2010 by Roy Magne Klever. All rights reserved
+//  rkView Â© 2010 by Roy Magne Klever. All rights reserved
 //
 //  This file is not distributable without permission by Roy Magne Klever
 //  WEB: www.rmklever.com
@@ -40,6 +40,17 @@ type
   TLine24 = array[0..0] of TRGB24;
   PLine24 = ^TLine24;
 
+  // Older Delphi compatibility
+  {$IF NOT Declared(NativeInt)}
+  NativeInt = Integer;
+  {$IFEND}
+  {$IF NOT Declared(NativeUInt)}
+  NativeUInt = Cardinal;
+  {$IFEND}
+
+  {$IFNDEF FPC}
+  // Don't use this version for (64-bits) Fpc since it's incorrect for 64-bits (also for Delphi!)
+  {$IFNDEF CPU64}
   TWMMouseWheel = record
     Msg: Cardinal;
     Keys: SmallInt;
@@ -52,6 +63,8 @@ type
         Pos: TSmallPoint;
         Result: Longint);
   end;
+  {$ENDIF}
+  {$ENDIF}
 
   TsvItemState = (svNormal, svSelected, svHot, svHotSelected);
 
@@ -647,11 +660,11 @@ end;
 procedure TrkCustomView.CMCtl3DChanged(var Message: TMessage);
 begin
   if NewStyleControls and (FBorderStyle = bsSingle) then
-  {$IFNDEF FPC}
-  RecreateWnd;
-  {$ELSE}
-  RecreateWnd(Self);
-  {$ENDIF}
+    {$IFNDEF FPC}
+    RecreateWnd;
+    {$ELSE}
+    RecreateWnd(Self);
+    {$ENDIF}
   inherited;
 end;
 
@@ -677,7 +690,11 @@ begin
   if not vsbVisible then
     Exit;
   // Only scroll if mouse is inside our view.
+  {$IFNDEF FPC}
   if not PtInRect(BoundsRect, ScreenToClient(Point(Msg.XPos, Msg.YPos))) then begin
+  {$ELSE} // Fpc sends mousewheel in client coordinates to be consistent with other widgetsets
+  if not PtInRect(ClientRect, Point(Msg.XPos, Msg.YPos)) then begin
+  {$ENDIF}
     inherited; // Give other components a chance to handle scrollwheel event.
     Exit;
   end;
@@ -928,11 +945,12 @@ end;
 
 procedure TrkCustomView.PaintView;
 var
-  x, y, w, h, cx, cy, nx, ny, fx, fy, d1, scr: integer;
-  XPos, YPos, Index, Col, Row, idxLimit, ImageHeight: Integer;
-  YCount, bx, by, bdx, bdy, addx, addy, imw, imh: Integer;
+  x, y, w, h, d1, scr: integer;
+  XPos, YPos, Index: Integer;
+  Row: NativeInt;
+  YCount, bx, by, bdx, bdy, imw, imh: Integer;
   R: TRect;
-  slSize, slMain: integer;
+  slSize, slMain: NativeInt;
   slPnt: PRGB24;
   bool: boolean;
   SItem: TsvItemState;
@@ -964,8 +982,8 @@ begin
 
   if (not (csDesigning in ComponentState)) and (not FUpdating) then
   begin
-    slMain := Integer(FMainBmp.ScanLine[0]);
-    slSize := Integer(FMainBmp.ScanLine[1]) - slMain;
+    slMain := NativeInt(FMainBmp.ScanLine[0]);
+    slSize := NativeInt(FMainBmp.ScanLine[1]) - slMain;
     if vsbVisible then
     begin
       YCount := ((sbVert.Position - FCellOffset) + FCellSpace) div ImgHeight;
@@ -1392,9 +1410,11 @@ begin
   FColorSelection.R := Byte(C);
   for i := 0 to 255 do
   begin
-    Ra[i] := (FColorSelection.R - i) shr 3 + i;
-    Ga[i] := (FColorSelection.G - i) shr 3 + i;
-    Ba[i] := (FColorSelection.B - i) shr 3 + i;
+    // Added Byte() around the computation, otherwise we get a crash when
+    // compiled for 64 bits with debug on when running; seems to be related to overflow
+    Ra[i] := Byte((FColorSelection.R - i) shr 3 + i);
+    Ga[i] := Byte((FColorSelection.G - i) shr 3 + i);
+    Ba[i] := Byte((FColorSelection.B - i) shr 3 + i);
   end;
 end;
 
@@ -1663,6 +1683,7 @@ begin
       R.Right := j + FColumns[i];
     end;
     bool := False;
+    InfoTip := '';
     OnHintShow(Self, Item, FHintColumn, InfoTip, bool);
     bugStr := 'Bummer: ' + IntToStr(FHintColumn);
     if (not bool) or (InfoTip = '') or (Selecting) or (FDragging) or (IsEditing)
@@ -1753,6 +1774,7 @@ begin
       FColumns[FDragColumn] := i
     else
       FColumns[FDragColumn] := 2;
+    s := '';
     for i := 0 to High(FColumns) do
       s := s + IntToStr(FColumns[i]) + ',';
     j := Length(s);

@@ -439,6 +439,10 @@ procedure jpeg_destroy(cinfo: PRJpegCommonStruct); cdecl; external;
 function  jpeg_std_error(err: PRJpegErrorMgr): Pointer; cdecl; external;
 function  jpeg_resync_to_restart(cinfo: PRJpegDecompressStruct; desired: Integer): Byte; cdecl; external;
 
+
+type
+  ELibJpegError = class(Exception);
+
 implementation
 
 {$IFNDEF FPC}
@@ -461,7 +465,7 @@ uses
 procedure jpeg_error_exit_raise; cdecl;
 {$IFDEF FPC} public name '_jpeg_error_exit_raise'; {$ENDIF}
 begin
-  raise Exception.Create('LibJpeg error_exit');
+  raise ELibJpegError.Create('LibJpeg: unrecoverable error');
 end;
 
 // Todo: We should set the default error handlers in initialization.
@@ -599,7 +603,17 @@ procedure jcopy_block_row(input_row: Pointer; output_row: Pointer; num_blocks: C
 {$L jidctflt.obj}
 {$ELSE}
   // fpc
-  {$LINKLIB libcrtdll} // _malloc and _free
+  {$IFDEF MSWINDOWS}
+    {$IFNDEF CPU64}
+      {$LINKLIB libcrtdll} // _malloc and _free
+    {$ELSE}
+      {$LINKLIB libmsvcrt.a}
+      {$LINKLIB libkernel32.a}
+    {$ENDIF}
+  {$ENDIF}
+  {$IFDEF UNIX}
+    Todo...
+  {$ENDIF}
   {$LINKLIB libjpeg.a}
 {$ENDIF}
 

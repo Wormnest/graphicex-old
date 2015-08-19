@@ -9,8 +9,12 @@ interface
 uses
   Windows, SysUtils;
 
+procedure _exit(code: Integer); cdecl;
+{$IFDEF FPC} public name 'exit';{$ENDIF}
 function  fprintf(stream: Pointer; format: Pointer; arguments: Pointer): Integer; cdecl;
 function  sprintf(buffer: Pointer; format: Pointer; arguments: Pointer): Integer; cdecl;
+function  snprintf(buffer: Pointer; bufsize: Integer; format: Pointer; arguments: Pointer): Integer; cdecl;
+{$IFDEF FPC} public name '_snprintf';{$ENDIF}
 function  fputs(s: Pointer; stream: Pointer): Integer; cdecl;
 function  fputc(c: Integer; stream: Pointer): Integer; cdecl;
 function  isprint(c: Integer): Integer; cdecl;
@@ -27,15 +31,45 @@ function  _ltowlower(ch: Integer): Integer; cdecl;
 function  _ltowupper(ch: Integer): Integer; cdecl;
 function  strcpy(dest: Pointer; src: Pointer): Pointer; cdecl;
 
-function  sprintfsec(buffer: Pointer; format: Pointer; arguments: Pointer): Integer;
+// bufsize = -1 means ignore max bufsize
+function  sprintfsec(buffer: Pointer; format: Pointer; arguments: Pointer;
+  bufsize: Integer = -1): Integer;
 
 var
   __turboFloat: LongBool = False;
   _streams: Integer;
 
+type ELibDelphiError = class(Exception);
+
 implementation
 
+  {$IF NOT Declared(UInt64)}
+type
+  UInt64 = Int64;
+  {$IFEND}
+  {$IF NOT Declared(PUInt64)}
+  // Fpc has UInt64 but not PUint64 so handle this separately from UInt64
+type
+  PUint64 = ^Uint64;
+  {$IFEND}
+  {$IF NOT Declared(NativeInt)}
+type
+  NativeInt = Integer;
+  {$IFEND}
+  {$IF NOT Declared(NativeUInt)}
+type
+  NativeUInt = Cardinal;
+  {$IFEND}
+
+
 {PODD}
+
+// Needed for 64 bits version of LibTiff etc since we can't figure out the
+// order yet that we need to link the libs for exit to be found in msvcrt.a
+procedure _exit(code: Integer); cdecl;
+begin
+  Halt(code);
+end;
 
 function fputc(c: Integer; stream: Pointer): Integer; cdecl;
 var
@@ -54,7 +88,7 @@ begin
     m[0]:=AnsiChar(c);
     n:=1;
   end;
-  WriteFile(Cardinal(stream),m[0],n,o,nil);
+  WriteFile(NativeUInt(stream),m[0],n,o,nil);
   Result:=c;
 end;
 
@@ -79,13 +113,18 @@ begin
     Inc(m);
     Inc(PByte(n));
   end;
-  WriteFile(Cardinal(stream),s^,Cardinal(m),o,nil);
+  WriteFile(NativeUInt(stream),s^,Cardinal(m),o,nil);
   Result:=1;
 end;
 
 function sprintf(buffer: Pointer; format: Pointer; arguments: Pointer): Integer; cdecl;
 begin
   Result := sprintfsec(buffer,format,arguments);
+end;
+
+function  snprintf(buffer: Pointer; bufsize: Integer; format: Pointer; arguments: Pointer): Integer; cdecl;
+begin
+  Result := sprintfsec(buffer, format, @arguments, bufsize);
 end;
 
 function fprintf(stream: Pointer; format: Pointer; arguments: Pointer): Integer; cdecl;
@@ -97,7 +136,7 @@ begin
   m:=sprintfsec(nil,format,arguments);
   GetMem(n,m);
   sprintfsec(n,format,arguments);
-  WriteFile(Cardinal(stream),n^,Cardinal(m),o,nil);
+  WriteFile(NativeUInt(stream),n^,Cardinal(m),o,nil);
   FreeMem(n);
   Result := m;
 end;
@@ -122,25 +161,28 @@ end;
 
 function _ltolower(ch: Integer): Integer; cdecl;
 begin
-  raise Exception.Create('LibDelphi - call to _ltolower - should presumably not occur');
+  raise ELibDelphiError.Create('LibDelphi - call to _ltolower - should presumably not occur');
 end;
 
 function _ltoupper(ch: Integer): Integer; cdecl;
 begin
-  raise Exception.Create('LibDelphi - call to _ltoupper - should presumably not occur');
+  raise ELibDelphiError.Create('LibDelphi - call to _ltoupper - should presumably not occur');
 end;
 
 function _ltowlower(ch: Integer): Integer; cdecl;
 begin
-  raise Exception.Create('LibDelphi - call to _ltowlower - should presumably not occur');
+  raise ELibDelphiError.Create('LibDelphi - call to _ltowlower - should presumably not occur');
 end;
 
 function _ltowupper(ch: Integer): Integer; cdecl;
 begin
-  raise Exception.Create('LibDelphi - call to _ltowupper - should presumably not occur');
+  raise ELibDelphiError.Create('LibDelphi - call to _ltowupper - should presumably not occur');
 end;
 
-function sprintfsec(buffer: Pointer; format: Pointer; arguments: Pointer): Integer;
+// bufsize = -1 means ignore max bufsize
+// buffer = nil: means only return the size needed for the buffer
+function sprintfsec(buffer: Pointer; format: Pointer; arguments: Pointer;
+  bufsize: Integer = -1): Integer;
 var
   Modifier: Integer;
   Width: Integer;
@@ -149,28 +191,57 @@ var
   n: PByte;
   o: PByte;
   r: PByte;
+  // BufSize checking
+  CheckSize: Boolean;
+  StopPos: NativeUInt;
 
 procedure Append(const p: AnsiString);
 var
   q: Integer;
+  IncLen: Integer;
 begin
-  if Width>Length(p) then
+  if Width > Length(p) then
   begin
-    if buffer<>nil then
+    if buffer <> nil then
     begin
-      for q:=0 to Width-Length(p)-1 do
-      begin
-        o^:=Ord('0');
-        Inc(o);
+      IncLen := Width-Length(p);
+      if CheckSize then begin
+        if NativeUInt(o) + NativeUInt(IncLen) >= StopPos then
+          IncLen := StopPos - 1 - NativeUInt(o); // -1: make room for #0
       end;
+      for q := 0 to IncLen-1 do
+      begin
+        o^ := Ord('0');
+        Inc(o);
+      end
     end
     else
-      Inc(o,Width-Length(p));
+      Inc(o, Width-Length(p));
   end;
-  if buffer<>nil then CopyMemory(o,PAnsiChar(p),Length(p));
-  Inc(o,Length(p));
+  if not CheckSize then begin
+    if buffer <> nil then
+      CopyMemory(o,PAnsiChar(p),Length(p));
+    Inc(o,Length(p));
+  end
+  else begin
+    IncLen := Length(p);
+    if buffer <> nil then begin
+      // Note: compare with >= StopPos because we also need to take into
+      // account the final #0 after the string is copied.
+      if NativeUInt(o) + NativeUInt(IncLen) >= StopPos then
+        IncLen := StopPos - 1 - NativeUInt(o); // -1: make room for #0
+      CopyMemory(o, PAnsiChar(p), IncLen);
+    end;
+    Inc(o, IncLen);
+  end;
 end;
 begin
+  CheckSize := bufsize <> -1;
+  if CheckSize then
+    if buffer <> nil then
+      StopPos := NativeUInt(buffer)+NativeUInt(bufsize)
+    else
+      StopPos := 0;
   m:=format;
   n:=arguments;
   o:=buffer;
@@ -223,9 +294,13 @@ begin
           Ord('F'): mb:=False;
           Ord('N'): mb:=False;
           Ord('h'): mb:=False;
-          Ord('l'):
+          Ord('l'), Ord('I'):
           begin
+            {$IFNDEF CPU64}
             Modifier:=4;
+            {$ELSE}
+            Modifier:=8; // On 64 bits OS this is a 64-bits type
+            {$ENDIF}
             Inc(m);
           end;
           Ord('L'): mb:=False;
@@ -234,6 +309,22 @@ begin
       if mb then
       begin
         {type}
+        // Note that on Windows 64 bits signed/unsigned can be specified
+        // as %I64d and %I64u. We need to handle that too. (N.B.: Uppercase i, not lowercase l!)
+        // Besides that %lld and %llu for the same is also possible.
+        if m^ = Ord('6') then begin
+          Inc(m);
+          if m^ = Ord('4') then begin
+            Modifier := 8;
+            Inc(m);
+          end
+          else
+            Dec(m);
+        end
+        else if m^ = Ord('l') then begin
+          Inc(m);
+          Modifier := 8;
+        end;
         case m^ of
           Ord('d'):
           begin
@@ -242,7 +333,13 @@ begin
               begin
                 Append(IntToStr(PInteger(n)^));
                 Inc(m);
-                Inc(n,SizeOf(Integer));
+                Inc(n,SizeOf(NativeInt));
+              end;
+              8:
+              begin
+                Append(IntToStr(PInt64(n)^));
+                Inc(m);
+                Inc(n,SizeOf(Int64));
               end;
             else
               mb:=False;
@@ -253,11 +350,25 @@ begin
           Ord('u'):
           begin
             case Modifier of
-              0,4:
+              0, 4:
               begin
                 Append(IntToStr(PCardinal(n)^));
                 Inc(m);
-                Inc(n,SizeOf(Cardinal));
+                // Note that although we use 4 bytes to show the value on
+                // 64 bits Windows the value is apparently put on the stack in 64 bits, 8 bytes!
+                Inc(n, SizeOf(NativeUInt));
+              end;
+              8:
+              begin
+                {$IF Declared(UIntToStr)}
+                Append(UIntToStr(PUInt64(n)^));
+                {$ELSE}
+                // For now we will have to add it as an Int64 and hope that
+                // the value is not higher than High(Int64).
+                Append(IntToStr(PUInt64(n)^));
+                {$IFEND}
+                Inc(m);
+                Inc(n, SizeOf(UInt64));
               end;
             else
               mb:=False;
@@ -268,10 +379,16 @@ begin
             case Modifier of
               0,4:
               begin
-                Append(IntToHex(PCardinal(n)^,8));
+                Append(IntToHex(PCardinal(n)^, 8));
                 Inc(m);
-                Inc(n,SizeOf(Cardinal));
+                Inc(n, SizeOf(NativeUInt));
               end;
+              8:
+              begin
+                Append(IntToHex(PUInt64(n)^, 16));
+                Inc(m);
+                Inc(n, SizeOf(UInt64));
+              end
             else
               mb:=False;
             end;
@@ -302,7 +419,11 @@ begin
             if r <> nil then
               while r^<>0 do
               begin
-                if buffer<>nil then o^:=r^;
+                if buffer <> nil then
+                  if not CheckSize or (NativeUInt(o) + 1 < StopPos) then
+                    o^ := r^
+                  else // No more room in buffer
+                    break;
                 Inc(o);
                 Inc(r);
               end;
@@ -313,7 +434,7 @@ begin
           Ord('n'): mb:=False;
           Ord('p'): mb:=False;
         else
-          raise Exception.Create('LibDelphi');
+          raise ELibDelphiError.Create('LibDelphi: unexpected specifier in sprintfsec');
         end;
       end;
       if mb=False then
@@ -341,7 +462,7 @@ begin
   end;
   if buffer<>nil then o^:=0;
   Inc(o);
-  Result:=(Cardinal(o)-Cardinal(buffer));
+  Result:=(NativeUInt(o)-NativeUInt(buffer));
 end;
 
 procedure free(p: Pointer); cdecl;

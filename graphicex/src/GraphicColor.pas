@@ -12,11 +12,11 @@ unit GraphicColor;
 //
 // The original code is GraphicCompression.pas, released November 1, 1999.
 //
-// The initial developer of the original code is Dipl. Ing. Mike Lischke (Plei�a, Germany, www.delphi-gems.com),
+// The initial developer of the original code is Dipl. Ing. Mike Lischke (Pleißa, Germany, www.delphi-gems.com),
 //
 // Portions created by Dipl. Ing. Mike Lischke are
 // Copyright (C) 1999-2003 Dipl. Ing. Mike Lischke. All Rights Reserved.
-// Portions Created by Jacob Boerema are Copyright (C) 2013 Jacob Boerema.
+// Portions Created by Jacob Boerema are Copyright (C) 2013-2015 Jacob Boerema.
 // All Rights Reserved.
 //----------------------------------------------------------------------------------------------------------------------
 //
@@ -79,21 +79,13 @@ interface
 {$ENDIF}
 
 uses
-  Windows, Graphics, GraphicStrings, SysUtils;
+  Windows, SysUtils, Graphics, gexTypes, GraphicStrings;
 
 const
   // This is the value for average CRT monitors, adjust it if your monitor differs.
   DefaultDisplayGamma = 2.2;
 
 type
-  // Define UInt64 as Int64 for Delphi versions not having UInt64
-  {$IF NOT Declared(UInt64)}
-  UInt64 = Int64;
-  {$IFEND}
-  {$IF NOT Declared(PUInt64)}
-  PUint64 = ^UInt64;
-  {$IFEND}
-
   // Color layout records
   // ------------------------- CMYK -------------------------
   PCMYK = ^TCMYK;
@@ -391,6 +383,10 @@ type
     property TargetExtraBPP: Byte read FTargetExtraBPP write FTargetExtraBPP;
   end;
 
+
+// Fpc/Lazarus is missing the CopyPalette function present in Delphi.
+function CopyPalette(Palette: HPALETTE): HPALETTE;
+
 // Common color conversion functions
 function HLStoRGB(const HLS: THLSFloat): TRGBFloat;
 function RGBToHLS(const RGB: TRGBFloat): THLSFloat;
@@ -474,10 +470,6 @@ function GetBits(BitIndex, NumberOfBits: Cardinal; BitData: PCardinal): Cardinal
 
 //------------------------------------------------------------------------------
 
-// Moved to interface so that we can check in try except on this exception and handle error reporting ourselves
-type
-  EColorConversionError = class(Exception);
-
 {$IFDEF FPC}
   // Missing in fpc/lazarus
 var
@@ -487,7 +479,7 @@ var
 implementation
 
 uses
-  Math;
+  Math, gexUtils;
 
 
 //----------------- Helper functions -------------------------------------------
@@ -495,7 +487,11 @@ uses
 procedure ShowError(const Msg: String);
 
 begin
-  raise EColorConversionError.Create(Msg);
+  {$IFNDEF FPC}
+  raise EgexColorConversionError.Create(Msg) at ReturnAddress;
+  {$ELSE}
+  raise EgexColorConversionError.Create(Msg) at get_caller_addr(get_frame), get_caller_frame(get_frame);
+  {$ENDIF}
 end;
 
 //------------------------------------------------------------------------------
@@ -564,6 +560,35 @@ end;
 {$ENDIF}
 
 //----------------- Common color conversion functions --------------------------
+
+// From Jvcl JvClipboardViewer
+// Fpc/Lazarus is missing the CopyPalette function present in Delphi.
+function CopyPalette(Palette: HPALETTE): HPALETTE;
+var
+  PaletteSize: Integer;
+  LogSize: Integer;
+  LogPalette: PLogPalette;
+begin
+  Result := 0;
+  if Palette = 0 then
+    Exit;
+  GetObject(Palette, SizeOf(PaletteSize), @PaletteSize);
+  LogSize := SizeOf(TLogPalette) + (PaletteSize - 1) * SizeOf(TPaletteEntry);
+  GetMem(LogPalette, LogSize);
+  try
+    with LogPalette^ do
+    begin
+      palVersion := $0300;
+      palNumEntries := PaletteSize;
+      GetPaletteEntries(Palette, 0, PaletteSize, palPalEntry);
+    end;
+    Result := CreatePalette(LogPalette^);
+  finally
+  FreeMem(LogPalette, LogSize);
+  end;
+end;
+
+//------------------------------------------------------------------------------
 
 function HLStoRGB(const HLS: THLSFloat): TRGBFloat;
 
@@ -1657,7 +1682,7 @@ function TColorManager.ComponentSwapScaleGammaConvert(Value: Word): Byte;
 
 begin
   //Result := FGammaTable[MulDiv16(Swap(Value), 255, 65535)];
-  Result := FGammaTable[Swap(Value) shr 8];
+  Result := FGammaTable[SwapEndian(Value) shr 8];
 end;
 
 //------------------------------------------------------------------------------
@@ -1666,7 +1691,7 @@ function TColorManager.ComponentSwapScaleConvert(Value: Word): Byte;
 
 begin
   //Result := MulDiv16(Swap(Value), 255, 65535);
-  Result := Swap(Value) shr 8;
+  Result := SwapEndian(Value) shr 8;
 end;
 
 //------------------------------------------------------------------------------
@@ -1674,7 +1699,7 @@ end;
 function TColorManager.ComponentSwapConvert(Value: Word): Word;
 
 begin
-  Result := Swap(Value);
+  Result := SwapEndian(Value);
 end;
 
 //----------------- Row conversion routines ------------------------------------
@@ -2419,7 +2444,7 @@ const
   // TIFF 6.0 specification tells that it is no default value for the WhitePoint,
   // but AdobePhotoshop TIFF Technical Note tells that it should be CIE D50.
 
-  // Observer= 2°, Illuminant= D50
+  // Observer= 2Â°, Illuminant= D50
   ref_X =  96.422;
   ref_Y = 100.000;
   ref_Z =  82.521;
@@ -3827,7 +3852,7 @@ begin
               begin
                 if Boolean(Mask and BitRun) then
                 begin
-                  Target16^ := Swap(Source16^);
+                  Target16^ := SwapEndian(Source16^);
                   Inc(Source16, 1 + AlphaSkip);
                 end;
                 BitRun := RorByte(BitRun);
@@ -4150,7 +4175,7 @@ begin
     begin
       if Boolean(Mask and BitRun) then
       begin
-        TargetRun^ := Swap(SourceRun^);
+        TargetRun^ := SwapEndian(SourceRun^);
         Inc(SourceRun);
       end;
       BitRun := RorByte(BitRun);
@@ -4208,7 +4233,7 @@ begin
     if Boolean(Mask and BitRun) then
     begin
       if coNeedByteSwap in FSourceOptions then
-        Value := MulDiv16(Swap(SourceRun16^), MaxOutSample, 65535)
+        Value := MulDiv16(SwapEndian(SourceRun16^), MaxOutSample, 65535)
       else
         Value := MulDiv16(SourceRun16^, MaxOutSample, 65535);
       TargetRun8^ := (TargetRun8^ and TargetMask) or (Value shl TargetShift);
@@ -4262,7 +4287,7 @@ begin
       Value := (SourceRun8^ and SourceMask) shr SourceShift;
       Value := MulDiv16(Value, 65535, MaxInSample);
       if coNeedByteSwap in FSourceOptions then
-        TargetRun16^ := Swap(Value)
+        TargetRun16^ := SwapEndian(Value)
       else
         TargetRun16^ := Value;
       if SourceShift = 0 then
@@ -4416,7 +4441,7 @@ begin
               begin
                 // Get palette index
                 if coNeedByteSwap in FSourceOptions then
-                  PalIndex := Swap(SourceRun16^)
+                  PalIndex := SwapEndian(SourceRun16^)
                 else
                   PalIndex := SourceRun16^;
 
@@ -4428,7 +4453,7 @@ begin
                 // Handle alpha channel
                 if CopyAlpha then begin
                   if coNeedByteSwap in FSourceOptions then
-                    AlphaVal16 := Swap(SourceRun16A^)
+                    AlphaVal16 := SwapEndian(SourceRun16A^)
                   else
                     AlphaVal16 := SourceRun16A^;
                   TargetRun8^.A := ComponentScaleConvert16To8(AlphaVal16);

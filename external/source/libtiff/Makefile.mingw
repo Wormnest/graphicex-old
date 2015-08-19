@@ -1,4 +1,5 @@
 # 2015-03-09 changed makefile to work for our requirements jb
+# 2015-08-04 Fix clean
 
 # The name of your C compiler:
 CC= gcc
@@ -112,8 +113,8 @@ libtiff.a:	$(LIBOBJECTS)
 	$(AR2) libtiff.a
 
 clean:
-	-del *.o
-	-del *.lib
-	-del *.dll
-	-del *.exe
-	-del *.pdb
+	-rm -f *.o
+	-rm -f *.lib
+	-rm -f *.dll
+	-rm -f *.exe
+	-rm -f *.pdb

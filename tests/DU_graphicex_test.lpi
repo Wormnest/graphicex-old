@@ -17,7 +17,7 @@
     <VersionInfo>
       <StringTable ProductVersion=""/>
     </VersionInfo>
-    <BuildModes Count="7">
+    <BuildModes Count="9">
       <Item1 Name="Default" Default="True"/>
       <Item2 Name="Debug">
         <CompilerOptions>
@@ -28,7 +28,6 @@
           </Target>
           <SearchPaths>
             <IncludeFiles Value="$(ProjOutDir)"/>
-            <Libraries Value="..\external\source\libjpeg;..\external\source\libtiff;..\external\source\zlib;E:\MinGW\lib\"/>
             <OtherUnitFiles Value="graphicex;common"/>
             <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
           </SearchPaths>
@@ -53,7 +52,8 @@
             </Options>
           </Linking>
           <Other>
-            <CustomOptions Value="-dIGNORE_EMPTY_TEST"/>
+            <CustomOptions Value="-dIGNORE_EMPTY_TEST
+-dLIBTIFF4"/>
           </Other>
         </CompilerOptions>
       </Item2>
@@ -66,7 +66,6 @@
           </Target>
           <SearchPaths>
             <IncludeFiles Value="$(ProjOutDir)"/>
-            <Libraries Value="..\external\source\libjpeg;..\external\source\libtiff;..\external\source\zlib;E:\MinGW\lib\"/>
             <OtherUnitFiles Value="graphicex;common"/>
             <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
           </SearchPaths>
@@ -88,7 +87,8 @@
             </Options>
           </Linking>
           <Other>
-            <CustomOptions Value="-dIGNORE_EMPTY_TEST"/>
+            <CustomOptions Value="-dIGNORE_EMPTY_TEST
+-dLIBTIFF4"/>
           </Other>
         </CompilerOptions>
       </Item3>
@@ -101,7 +101,6 @@
           </Target>
           <SearchPaths>
             <IncludeFiles Value="$(ProjOutDir)"/>
-            <Libraries Value="..\external\source\libjpeg;..\external\source\libtiff;..\external\source\zlib;E:\MinGW\lib\"/>
             <OtherUnitFiles Value="graphicex;common"/>
             <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
           </SearchPaths>
@@ -131,7 +130,11 @@
             </Options>
           </Linking>
           <Other>
-            <CustomOptions Value="-dIGNORE_EMPTY_TEST"/>
+            <Verbosity>
+              <ShowAll Value="True"/>
+            </Verbosity>
+            <CustomOptions Value="-dIGNORE_EMPTY_TEST
+-dLIBTIFF4"/>
           </Other>
         </CompilerOptions>
       </Item4>
@@ -144,7 +147,6 @@
           </Target>
           <SearchPaths>
             <IncludeFiles Value="$(ProjOutDir)"/>
-            <Libraries Value="..\external\source\libjpeg;..\external\source\libtiff;..\external\source\zlib;E:\MinGW\lib\"/>
             <OtherUnitFiles Value="graphicex;common"/>
             <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
           </SearchPaths>
@@ -173,7 +175,8 @@
           </Linking>
           <Other>
             <CustomOptions Value="-dIGNORE_EMPTY_TEST
--dHEAPTRC_LOG"/>
+-dHEAPTRC_LOG
+-dLIBTIFF4"/>
           </Other>
         </CompilerOptions>
       </Item5>
@@ -186,7 +189,6 @@
           </Target>
           <SearchPaths>
             <IncludeFiles Value="$(ProjOutDir)"/>
-            <Libraries Value="..\external\source\libjpeg;..\external\source\libtiff;..\external\source\zlib;E:\MinGW\lib\"/>
             <OtherUnitFiles Value="graphicex;common"/>
             <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
           </SearchPaths>
@@ -218,7 +220,8 @@
           </Linking>
           <Other>
             <CustomOptions Value="-dIGNORE_EMPTY_TEST
--dHEAPTRC"/>
+-dHEAPTRC_LOG
+-dLIBTIFF4"/>
           </Other>
         </CompilerOptions>
       </Item6>
@@ -231,7 +234,6 @@
           </Target>
           <SearchPaths>
             <IncludeFiles Value="$(ProjOutDir)"/>
-            <Libraries Value="..\external\source\libjpeg;..\external\source\libtiff;..\external\source\zlib;E:\MinGW\lib\"/>
             <OtherUnitFiles Value="graphicex;common"/>
             <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
           </SearchPaths>
@@ -259,12 +261,113 @@
             <CustomOptions Value="-FcUTF8
 -dIGNORE_EMPTY_TEST
 -dUNICODE
--dEnableUTF8"/>
+-dEnableUTF8
+-dLIBTIFF4"/>
           </Other>
         </CompilerOptions>
       </Item7>
-      <SharedMatrixOptions Count="1">
+      <Item8 Name="Debug64 with Tracetool">
+        <CompilerOptions>
+          <Version Value="11"/>
+          <PathDelim Value="\"/>
+          <Target>
+            <Filename Value="bin\$(BuildMode)_DU_graphicex_test_$(TargetCPU)"/>
+          </Target>
+          <SearchPaths>
+            <IncludeFiles Value="$(ProjOutDir)"/>
+            <OtherUnitFiles Value="graphicex;common"/>
+            <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
+          </SearchPaths>
+          <Conditionals Value="// example for adding linker options on Mac OS X
+//if TargetOS='darwin' then
+//  LinkerOptions := ' -framework OpenGL';
+
+// example for adding a unit and include path on Windows
+//if SrcOS='win' then begin
+//  UnitPath += ';win';
+//  IncPath += ';win';
+//end;
+
+if TargetOS='Win64' then
+   UnitPath += ';..\..\tracetool\Delphi\Delphi Library';"/>
+          <Parsing>
+            <SyntaxOptions>
+              <IncludeAssertionCode Value="True"/>
+            </SyntaxOptions>
+          </Parsing>
+          <CodeGeneration>
+            <Checks>
+              <IOChecks Value="True"/>
+              <RangeChecks Value="True"/>
+              <OverflowChecks Value="True"/>
+              <StackChecks Value="True"/>
+            </Checks>
+            <TargetCPU Value="x86_64"/>
+            <TargetOS Value="win64"/>
+          </CodeGeneration>
+          <Linking>
+            <Debugging>
+              <DebugInfoType Value="dsDwarf2Set"/>
+            </Debugging>
+            <Options>
+              <Win32>
+                <GraphicApplication Value="True"/>
+              </Win32>
+            </Options>
+          </Linking>
+          <Other>
+            <Verbosity>
+              <ShowAll Value="True"/>
+            </Verbosity>
+            <CustomOptions Value="-dIGNORE_EMPTY_TEST
+-dLIBTIFF4
+-dENABLE_TRACETOOL"/>
+          </Other>
+        </CompilerOptions>
+      </Item8>
+      <Item9 Name="Debug with Tracetool">
+        <CompilerOptions>
+          <Version Value="11"/>
+          <PathDelim Value="\"/>
+          <Target>
+            <Filename Value="bin\$(BuildMode)_DU_graphicex_test_$(TargetCPU)"/>
+          </Target>
+          <SearchPaths>
+            <IncludeFiles Value="$(ProjOutDir)"/>
+            <OtherUnitFiles Value="graphicex;common"/>
+            <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
+          </SearchPaths>
+          <Parsing>
+            <SyntaxOptions>
+              <IncludeAssertionCode Value="True"/>
+            </SyntaxOptions>
+          </Parsing>
+          <CodeGeneration>
+            <Checks>
+              <IOChecks Value="True"/>
+              <RangeChecks Value="True"/>
+              <OverflowChecks Value="True"/>
+              <StackChecks Value="True"/>
+            </Checks>
+          </CodeGeneration>
+          <Linking>
+            <Options>
+              <Win32>
+                <GraphicApplication Value="True"/>
+              </Win32>
+            </Options>
+          </Linking>
+          <Other>
+            <CustomOptions Value="-dIGNORE_EMPTY_TEST
+-dLIBTIFF4
+-dENABLE_TRACETOOL"/>
+          </Other>
+        </CompilerOptions>
+      </Item9>
+      <SharedMatrixOptions Count="3">
         <Item1 ID="707623224695" Value="-dEnableUTF8RTL"/>
+        <Item2 ID="868206001400" Modes="Debug with Tracetool,Debug64 with Tracetool" Value="-dENABLE_TRACETOOL"/>
+        <Item3 ID="018455230448" Modes="Debug64,Debug,Release,Debug with Heaptrc,Debug64 with Heaptrc,Debug UTF8,Debug64 with Tracetool,Debug with Tracetool" Value="-dLIBTIFF4"/>
       </SharedMatrixOptions>
     </BuildModes>
     <PublishOptions>
@@ -328,7 +431,7 @@
     </Other>
   </CompilerOptions>
   <Debugging>
-    <Exceptions Count="5">
+    <Exceptions Count="14">
       <Item1>
         <Name Value="EAbort"/>
       </Item1>
@@ -344,6 +447,33 @@
       <Item5>
         <Name Value="EColorConversionError"/>
       </Item5>
+      <Item6>
+        <Name Value="FPImageException"/>
+      </Item6>
+      <Item7>
+        <Name Value="Exception"/>
+      </Item7>
+      <Item8>
+        <Name Value="RunError(215)"/>
+      </Item8>
+      <Item9>
+        <Name Value="EIntOverflow"/>
+      </Item9>
+      <Item10>
+        <Name Value="RunError(203)"/>
+      </Item10>
+      <Item11>
+        <Name Value="EOutOfMemory"/>
+      </Item11>
+      <Item12>
+        <Name Value="EAssertionFailedError"/>
+      </Item12>
+      <Item13>
+        <Name Value="EOSError"/>
+      </Item13>
+      <Item14>
+        <Name Value="EIgnoredTest"/>
+      </Item14>
     </Exceptions>
   </Debugging>
 </CONFIG>

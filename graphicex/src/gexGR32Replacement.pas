@@ -11,6 +11,7 @@ interface
 
 {$IFDEF FPC}
   {$mode delphi}
+  {$DEFINE USEINLINING}
 {$ENDIF}
 
 type
@@ -40,12 +41,18 @@ implementation
 uses Math;
 
 function Color32(R, G, B: Byte; A: Byte = $FF): TColor32;
+{$IFNDEF CPU64}
 asm
         MOV  AH,A
         SHL  EAX,16
         MOV  AH,DL
         MOV  AL,CL
 end;
+{$ELSE}
+begin
+  Result := (A shl 24) or (R shl 16) or (G shl  8) or B;
+end;
+{$ENDIF}
 
 function RedComponent(Color32: TColor32): Integer;
 begin
